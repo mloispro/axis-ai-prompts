@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "apps": [
+    {
+      "appId": "rizzchatai",
+      "displayName": "RizzChatAI",
+      "promptsPath": "prompts/rizzchatai.json",
+      "defaultModel": "gpt-4o-mini",
+      "modes": ["opener", "app_chat", "reg_chat"]
+    }
+  ]
+}
+

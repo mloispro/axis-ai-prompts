@@ -1,33 +1,24 @@
 # ai-prompts
 
-A personal, public prompts repo intended to be **readable by anyone** but **writable only by you** (no collaborators).
+A personal, public prompts repo intended to be **readable by anyone** but **writable only by you**.
 
-This repo is designed to support multiple apps. Each app has its own prompt file under `prompts/`.
+## Structure (organized by app)
+- `prompts/<appId>.json` — canonical prompt files consumed by apps (stable paths)
+- `fixtures/<appId>/<mode>/*.txt` — sample user inputs for iterating (optional)
+- `index.json` — optional app discovery metadata (used by the web workbench)
+- `workbench/` — optional local web UI + engine (runs on your computer)
+- `tools/workbench/` — optional desktop CLI workbench (runs on your computer)
 
-## Quick start (structure)
+## Web workbench (Windows)
+1) Copy:
+- `workbench/.env.local.example` → `workbench/.env.local`
+- Set `OPENAI_API_KEY=...`
 
-- `prompts/`
-  - One JSON file per app (recommended)
-- `fixtures/`
-  - Optional prompt workbench fixtures (sample inputs), ideally scoped per app:
-    - `fixtures/<appId>/<mode>/*.txt`
-- `tools/`
-  - Optional desktop workbench scripts
+2) Run:
+- Double-click `run.bat` (repo root), OR
+- Double-click `workbench/run.bat`
 
-## Hosting (free)
-
-Use GitHub raw content URLs, e.g.
-
-`https://raw.githubusercontent.com/<you>/ai-prompts/main/prompts/rizzchatai.json`
-
-## Security notes
-
-- Prompts here are **public**. Don’t store secrets or private user data.
+## Safety
+- This repository is public. Don’t commit secrets or PII.
 - Never commit API keys.
-
-## Suggested hardening (GitHub settings)
-
-- Don’t add collaborators.
-- Add branch protection on `main` and **restrict who can push** to only you.
-
 

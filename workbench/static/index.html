@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prompt Workbench Web</title>
+  <style>
+    body { font-family: system-ui, Segoe UI, Arial, sans-serif; max-width: 1100px; margin: 24px auto; padding: 0 12px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+    label { display: block; font-size: 12px; color: #444; margin-bottom: 4px; }
+    select, input[type="number"], input[type="text"], textarea { width: 100%; padding: 8px; border: 1px solid #ccc; border-radius: 8px; }
+    textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 140px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; background: #fff; }
+    .col { flex: 1; min-width: 220px; }
+    button { padding: 10px 14px; border-radius: 10px; border: 1px solid #111; background: #111; color: white; cursor: pointer; }
+    button.secondary { background: white; color: #111; }
+    pre { white-space: pre-wrap; background: #0b0f14; color: #e6edf3; padding: 10px; border-radius: 10px; overflow: auto; }
+    .muted { color: #555; font-size: 12px; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Prompt Workbench Web (local)</h1>
+  <p class="muted">Local-only UI for iterating on prompts in this repo. API key is read from OPENAI_API_KEY (recommended: workbench/.env.local).</p>
+
+  <div class="card">
+    <div class="row">
+      <div class="col">
+        <label>App</label>
+        <select id="appSelect"></select>
+      </div>
+      <div class="col">
+        <label>Mode</label>
+        <select id="modeSelect"></select>
+      </div>
+      <div class="col">
+        <label>Model</label>
+        <input id="modelInput" type="text" value="gpt-4o-mini" />
+      </div>
+      <div class="col">
+        <label>Max fixtures</label>
+        <input id="maxFixtures" type="number" min="0" max="200" value="3" />
+        <div class="muted">0 = all</div>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="grid2">
+      <div>
+        <label>Baseline prompts source</label>
+        <select id="baselineSource">
+          <option value="remote_url" selected>Remote URL (ai-prompts / app default)</option>
+          <option value="local_file">Local baseline file (advanced)</option>
+        </select>
+      </div>
+      <div>
+        <label>Candidate prompts (editable)</label>
+        <div class="muted">Edits are saved to workbench/state/candidates/&lt;appId&gt;.json (gitignored).</div>
+      </div>
+    </div>
+
+    <div class="grid2">
+      <div>
+        <label>Remote URL (when selected)</label>
+        <input id="remoteUrl" type="text" />
+      </div>
+      <div>
+        <label>Candidate JSON</label>
+        <textarea id="candidateJson"></textarea>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="row">
+      <button id="runBtn">Run A/B</button>
+      <button class="secondary" id="openLastBtn">Open last report</button>
+      <span id="status" class="muted"></span>
+    </div>
+  </div>
+
+  <div style="height:14px"></div>
+
+  <div class="card">
+    <h2>Results</h2>
+    <div id="results"></div>
+  </div>
+
+<script>
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(t || ('HTTP ' + res.status));
+  }
+  return res;
+}
+
+function esc(s) {
+  return (s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+}
+
+async function loadApps() {
+  const apps = await (await api('/api/apps')).json();
+  const appSelect = document.getElementById('appSelect');
+  appSelect.innerHTML = '';
+  for (const a of apps) {
+    const opt = document.createElement('option');
+    opt.value = a.appId;
+    opt.textContent = a.displayName;
+    appSelect.appendChild(opt);
+  }
+  appSelect.addEventListener('change', () => onAppChanged());
+  await onAppChanged();
+}
+
+async function onAppChanged() {
+  const appId = document.getElementById('appSelect').value;
+  const cfg = await (await api('/api/apps/' + encodeURIComponent(appId))).json();
+
+  const modeSelect = document.getElementById('modeSelect');
+  modeSelect.innerHTML = '';
+  for (const m of cfg.modes) {
+    const opt = document.createElement('option');
+    opt.value = m;
+    opt.textContent = m;
+    modeSelect.appendChild(opt);
+  }
+
+  document.getElementById('remoteUrl').value = cfg.defaultRemotePromptsUrl;
+  document.getElementById('modelInput').value = cfg.defaultModel || 'gpt-4o-mini';
+
+  // Default baseline to remote for the selected app.
+  document.getElementById('baselineSource').value = 'remote_url';
+
+  const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
+  document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
+}
+
+async function runAb() {
+  const status = document.getElementById('status');
+  status.textContent = 'Running…';
+
+  const appId = document.getElementById('appSelect').value;
+  const mode = document.getElementById('modeSelect').value;
+  const model = document.getElementById('modelInput').value.trim();
+  const maxFixtures = parseInt(document.getElementById('maxFixtures').value, 10) || 0;
+  const baselineSource = document.getElementById('baselineSource').value;
+  const remoteUrl = document.getElementById('remoteUrl').value.trim();
+
+  // Save candidate file first.
+  const candidateJson = document.getElementById('candidateJson').value;
+  await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: candidateJson });
+
+  const payload = { appId, mode, model, maxFixtures, baselineSource, remoteUrl };
+  const run = await (await api('/api/run/ab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })).json();
+
+  status.textContent = 'Done';
+  renderResults(run);
+}
+
+function renderResults(run) {
+  const root = document.getElementById('results');
+  const meta = `<div class="muted">Out: ${esc(run.outDir)} | Report: <a href="${esc(run.reportPath)}" target="_blank">ab_report.html</a></div>`;
+
+  let html = meta;
+  for (const r of run.items) {
+    html += `<hr><h3>${esc(r.fixture)}</h3>`;
+    html += `<div class="muted">Diff: ${esc(r.diffFile || '')}</div>`;
+    html += `<div><strong>INPUT</strong><pre>${esc(r.input)}</pre></div>`;
+    html += `<div class="grid2">`;
+    html += `<div><strong>BASELINE</strong><pre>${esc(r.baselineOutput)}</pre></div>`;
+    html += `<div><strong>CANDIDATE</strong><pre>${esc(r.candidateOutput)}</pre></div>`;
+    html += `</div>`;
+  }
+
+  root.innerHTML = html;
+}
+
+async function openLastReport() {
+  await api('/api/open-last', { method: 'POST' });
+}
+
+document.getElementById('runBtn').addEventListener('click', () => runAb().catch(e => {
+  document.getElementById('status').textContent = 'Error: ' + e.message;
+}));
+
+document.getElementById('openLastBtn').addEventListener('click', () => openLastReport().catch(e => {
+  document.getElementById('status').textContent = 'Error: ' + e.message;
+}));
+
+loadApps().catch(e => {
+  document.getElementById('status').textContent = 'Error: ' + e.message;
+});
+</script>
+</body>
+</html>
+

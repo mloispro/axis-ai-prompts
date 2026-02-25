@@ -1,12 +1,21 @@
-# Python
-__pycache__/
-*.pyc
-.venv/
+# Workbench local env / venv (never commit)
+workbench/.venv/
+workbench/.env.local
 
-# Outputs
+# Workbench output artifacts
+workbench/out/
+
+# CLI output artifacts
 out/
 
-# OS
+# Workbench local draft state (never commit)
+workbench/state/
+
+# Python caches
+**/__pycache__/
+*.pyc
+
+# OS/editor noise
 .DS_Store
 Thumbs.db
 

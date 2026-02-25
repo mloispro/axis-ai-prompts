@@ -1,0 +1,915 @@
+"""Prompt workbench for iterating on prompt text without rebuilding the Android app.
+
+Key goals:
+- Fixture-first prompt iteration
+- Saved artifacts per run (outputs + manifest)
+- Optional A/B comparison with diffs
+- Uses the OpenAI Python SDK with the Responses API
+
+Defaults:
+- Loads prompts from ../../docs/prompts.json unless overridden.
+- Loads fixtures from ./fixtures/<mode>/*.txt
+
+Environment:
+- OPENAI_API_KEY must be set for real runs.
+
+Examples:
+  # sanity check (no API call)
+  python run.py --mode reg_chat --validate-only
+
+  # smoke run (1 fixture) using default prompts path
+  python run.py --mode reg_chat --max-fixtures 1
+
+  # run against prompts from a URL (e.g., raw GitHub)
+  python run.py --mode reg_chat --prompts-url https://example.com/rizzchatai.json
+
+  # A/B compare two prompt JSON files
+  python run.py --mode reg_chat --baseline-prompts-path A.json --candidate-prompts-path B.json --max-fixtures 3
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import datetime
+import difflib
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+
+MODES = ("opener", "app_chat", "reg_chat")
+
+
+@dataclasses.dataclass(frozen=True)
+class PromptBundle:
+    version: int
+    updated_at: str
+    ttl_seconds: int
+    opener_system: str
+    app_chat_system: str
+    reg_chat_system: str
+
+
+def _repo_root() -> Path:
+    # workbench/engine.py -> repo root is the parent of workbench/
+    return Path(__file__).resolve().parents[1]
+
+
+def _utc_now_iso() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _utc_timestamp_slug() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def _sha256_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _clamp_int(v: int, min_v: int, max_v: int) -> int:
+    return max(min_v, min(max_v, v))
+
+
+def _read_text_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _fetch_url_bytes(url: str, timeout_s: int = 15) -> bytes:
+    req = urllib.request.Request(url, headers={"User-Agent": "RizzChatAI-PromptWorkbench/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        return resp.read()
+
+
+def _try_git_head_sha(cwd: Path) -> Optional[str]:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(cwd),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return out or None
+    except Exception:
+        return None
+
+
+def load_prompts_json_from_bytes(data: bytes, source: str) -> PromptBundle:
+    raw = json.loads(data.decode("utf-8"))
+    prompts = raw.get("prompts") or {}
+
+    def _s(key: str) -> str:
+        v = prompts.get(key)
+        if v is None:
+            return ""
+        if not isinstance(v, str):
+            raise ValueError(f"{source}: prompts.{key} must be a string")
+        return v
+
+    version = raw.get("version")
+    updated_at = raw.get("updatedAt")
+    ttl_seconds = raw.get("ttlSeconds")
+
+    if not isinstance(version, int):
+        raise ValueError(f"{source}: version must be an int")
+    if not isinstance(updated_at, str) or not updated_at.strip():
+        raise ValueError(f"{source}: updatedAt must be a non-empty string")
+    if not isinstance(ttl_seconds, int):
+        raise ValueError(f"{source}: ttlSeconds must be an int")
+
+    return PromptBundle(
+        version=version,
+        updated_at=updated_at,
+        ttl_seconds=ttl_seconds,
+        opener_system=_s("openerSystem"),
+        app_chat_system=_s("appChatSystem"),
+        reg_chat_system=_s("regChatSystem"),
+    )
+
+
+def load_prompts_bundle(
+    *,
+    prompts_path: Optional[Path],
+    prompts_url: str,
+    default_prompts_path: Path,
+) -> Tuple[PromptBundle, str, str]:
+    """Returns (bundle, source_kind, source_id).
+
+    source_kind: PATH | URL
+    source_id: absolute path string or URL
+    """
+    if prompts_path and prompts_url:
+        raise ValueError("Use only one of --prompts-path or --prompts-url")
+
+    if prompts_url:
+        data = _fetch_url_bytes(prompts_url)
+        return load_prompts_json_from_bytes(data, source=prompts_url), "URL", prompts_url
+
+    path = prompts_path or default_prompts_path
+    data = path.read_bytes()
+    return load_prompts_json_from_bytes(data, source=str(path)), "PATH", str(path.resolve())
+
+
+def system_prompt_for_mode(bundle: PromptBundle, mode: str) -> str:
+    return {
+        "opener": bundle.opener_system,
+        "app_chat": bundle.app_chat_system,
+        "reg_chat": bundle.reg_chat_system,
+    }[mode]
+
+
+def load_fixtures(fixtures_dir: Path, mode: str, app_id: str = "") -> List[Tuple[str, str]]:
+    """Load fixtures for a mode.
+
+    Preferred layout:
+      fixtures/<appId>/<mode>/*.txt
+
+    Legacy fallback:
+      fixtures/<mode>/*.txt
+    """
+    mode = mode.strip()
+    app_id = app_id.strip()
+
+    searched: List[Path] = []
+
+    mode_dir = fixtures_dir / app_id / mode if app_id else fixtures_dir / mode
+    searched.append(mode_dir)
+    if app_id and not mode_dir.exists():
+        mode_dir = fixtures_dir / mode
+        searched.append(mode_dir)
+
+    if not mode_dir.exists():
+        raise FileNotFoundError(
+            f"Missing fixtures dir. Searched: {', '.join(str(p) for p in searched)}"
+        )
+
+    items: List[Tuple[str, str]] = []
+    for p in sorted(mode_dir.glob("*.txt")):
+        text = p.read_text(encoding="utf-8").strip()
+        if not text:
+            continue
+        items.append((p.stem, text))
+
+    if not items:
+        raise ValueError(f"No .txt fixtures found in {mode_dir}")
+
+    return items
+
+
+def ensure_api_key() -> None:
+    key = os.getenv("OPENAI_API_KEY")
+    if not key or not key.strip():
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Create workbench/.env.local (gitignored) with OPENAI_API_KEY=..."
+        )
+    # Never print the key. Basic sanity: avoid strings that look like a placeholder.
+    if "<" in key or ">" in key:
+        raise RuntimeError("OPENAI_API_KEY looks like a placeholder; set a real key")
+
+
+def build_messages(system_prompt: str, user_text: str) -> List[Dict[str, Any]]:
+    # Responses API supports chat-style role messages in `input`.
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_text},
+    ]
+
+
+def call_openai(model: str, messages: List[Dict[str, Any]], temperature: float, max_output_tokens: int) -> str:
+    from openai import OpenAI
+
+    client = OpenAI()
+
+    resp = client.responses.create(
+        model=model,
+        input=messages,
+        temperature=temperature,
+        max_output_tokens=max_output_tokens,
+    )
+
+    text = getattr(resp, "output_text", None)
+    if isinstance(text, str) and text.strip():
+        return text.strip()
+
+    # Fallback: best-effort extraction.
+    try:
+        chunks: List[str] = []
+        for item in resp.output:
+            for c in item.content:
+                if getattr(c, "type", "") == "output_text":
+                    chunks.append(c.text)
+        out = "".join(chunks).strip()
+        if out:
+            return out
+    except Exception:
+        pass
+
+    raise RuntimeError("OpenAI response parsing failed: no text output")
+
+
+def basic_heuristic_flags(mode: str, text: str) -> List[str]:
+    flags: List[str] = []
+    t = text.strip()
+
+    if re.search(r"\b(chatgpt|openai|as an ai|i am an ai)\b", t, re.IGNORECASE):
+        flags.append("mentions_ai")
+
+    if '"' in t or "\u201c" in t or "\u201d" in t:
+        flags.append("contains_quotes")
+
+    if ":" in t:
+        flags.append("contains_colon")
+
+    # Common dash-like chars: -, – , —
+    if any(ch in t for ch in ["-", "–", "—"]):
+        flags.append("contains_dash")
+
+    if mode in ("opener", "app_chat") and re.search(r"\bcoffee\b", t, re.IGNORECASE):
+        flags.append("mentions_coffee")
+
+    if mode == "opener":
+        # 1–2 lines max.
+        if t.count("\n") >= 2:
+            flags.append("too_many_lines_for_opener")
+
+    if not t:
+        flags.append("empty_output")
+
+    return flags
+
+
+def write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+
+
+def write_output(out_dir: Path, mode: str, fixture_name: str, content: str) -> Path:
+    p = out_dir / mode / f"{fixture_name}.txt"
+    write_text(p, content)
+    return p
+
+
+def unified_diff(a: str, b: str, a_label: str, b_label: str) -> str:
+    a_lines = a.splitlines(keepends=True)
+    b_lines = b.splitlines(keepends=True)
+    return "".join(difflib.unified_diff(a_lines, b_lines, fromfile=a_label, tofile=b_label))
+
+
+def run_one(
+    *,
+    mode: str,
+    model: str,
+    temperature: float,
+    max_output_tokens: int,
+    system_prompt: str,
+    fixtures: Sequence[Tuple[str, str]],
+    out_root: Path,
+    variant: str,
+) -> Dict[str, Dict[str, Any]]:
+    results: Dict[str, Dict[str, Any]] = {}
+
+    for (name, user_text) in fixtures:
+        messages = build_messages(system_prompt=system_prompt, user_text=user_text)
+        try:
+            output = call_openai(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+                max_output_tokens=max_output_tokens,
+            )
+            error: Optional[str] = None
+        except Exception as e:
+            output = ""
+            error = f"{type(e).__name__}: {e}"
+
+        flags = basic_heuristic_flags(mode, output)
+
+        # Store artifact.
+        safe = output if output else (f"[ERROR] {error}" if error else "")
+        out_path = out_root / variant
+        write_output(out_path, mode, name, safe)
+
+        results[name] = {
+            "output": output,
+            "error": error,
+            "flags": flags,
+            "chars": len(output),
+        }
+
+    return results
+
+
+def _html_escape(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def write_ab_report_html(
+    out_root: Path,
+    mode: str,
+    fixtures: Sequence[str],
+    diff_index: Dict[str, Any],
+) -> Path:
+    parts: List[str] = []
+    parts.append("<!doctype html><html><head><meta charset='utf-8'>")
+    parts.append("<title>Prompt Workbench A/B Report</title>")
+    parts.append(
+        "<style>body{font-family:system-ui,Segoe UI,Arial;max-width:1100px;margin:24px auto;padding:0 12px;}"
+        "h1{margin:0 0 12px} .meta{color:#444;margin:0 0 18px}"
+        "pre{white-space:pre-wrap;background:#0b0f14;color:#e6edf3;padding:12px;border-radius:8px;overflow:auto}"
+        ".grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}"
+        ".card{border:1px solid #ddd;border-radius:10px;padding:12px}"
+        ".flags{font-size:12px;color:#b45309}"
+        "a{color:#2563eb;text-decoration:none} a:hover{text-decoration:underline}"
+        "</style>"
+    )
+    parts.append("</head><body>")
+    parts.append(f"<h1>A/B Report — { _html_escape(mode) }</h1>")
+    parts.append(f"<p class='meta'>Out: {_html_escape(str(out_root))}</p>")
+    parts.append("<ol>")
+    for name in fixtures:
+        parts.append(f"<li><a href='#f-{_html_escape(name)}'>{_html_escape(name)}</a></li>")
+    parts.append("</ol>")
+
+    for name in fixtures:
+        item = diff_index.get(name) or {}
+        base = item.get("baseline") or {}
+        cand = item.get("candidate") or {}
+        diff_file = item.get("diffFile") or ""
+
+        btxt = base.get("output") or ("[ERROR] " + base.get("error") if base.get("error") else "")
+        ctxt = cand.get("output") or ("[ERROR] " + cand.get("error") if cand.get("error") else "")
+
+        bflags = ",".join(base.get("flags") or [])
+        cflags = ",".join(cand.get("flags") or [])
+
+        parts.append(f"<hr><h2 id='f-{_html_escape(name)}'>{_html_escape(name)}</h2>")
+        parts.append("<div class='grid'>")
+        parts.append("<div class='card'>")
+        parts.append(f"<div><strong>Baseline</strong> <span class='flags'>{_html_escape(bflags) if bflags else ''}</span></div>")
+        parts.append(f"<pre>{_html_escape(str(btxt))}</pre>")
+        parts.append("</div>")
+        parts.append("<div class='card'>")
+        parts.append(f"<div><strong>Candidate</strong> <span class='flags'>{_html_escape(cflags) if cflags else ''}</span></div>")
+        parts.append(f"<pre>{_html_escape(str(ctxt))}</pre>")
+        parts.append("</div>")
+        parts.append("</div>")
+
+        if diff_file:
+            parts.append(f"<p>Diff file: {_html_escape(diff_file)}</p>")
+
+    parts.append("</body></html>")
+    report_path = out_root / "ab_report.html"
+    write_text(report_path, "\n".join(parts))
+    return report_path
+
+
+def _load_dotenv_if_present(path: Path) -> None:
+    """Load KEY=VALUE lines into os.environ if not already set.
+
+    This is intentionally minimal (no external dependency) and only for local dev.
+    Supported files (checked in this order):
+    - .env.local
+    - .env
+
+    Lines starting with # are ignored.
+    Values may be quoted with single or double quotes.
+    """
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip().strip('"').strip("'")
+        if not k:
+            continue
+        # Don't override real env vars.
+        if os.getenv(k) is None:
+            os.environ[k] = v
+
+
+def _prompt_choice(label: str, choices: Sequence[str], default: str) -> str:
+    print(f"\n{label}")
+    for i, c in enumerate(choices, start=1):
+        d = " (default)" if c == default else ""
+        print(f"  {i}) {c}{d}")
+    while True:
+        raw = input(f"Select 1-{len(choices)} [{default}]: ").strip()
+        if not raw:
+            return default
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(choices):
+                return choices[idx - 1]
+        if raw in choices:
+            return raw
+        print("Invalid selection.")
+
+
+def _prompt_int(label: str, default: int, min_v: int, max_v: int) -> int:
+    while True:
+        raw = input(f"{label} [{default}]: ").strip()
+        if not raw:
+            return default
+        try:
+            v = int(raw)
+            if v < min_v or v > max_v:
+                raise ValueError()
+            return v
+        except Exception:
+            print(f"Enter an integer between {min_v} and {max_v}.")
+
+
+def interactive_flow(default_prompts_url: str) -> int:
+    print("Prompt Workbench — Interactive")
+    print("This will call the OpenAI API and save outputs under tools/prompt_workbench/out/<timestamp>.")
+    print("Key source: OPENAI_API_KEY (recommended: put it in .env.local once)")
+
+    mode = _prompt_choice("Which prompt mode?", list(MODES), default="reg_chat")
+
+    run_type = _prompt_choice(
+        "What do you want to do?",
+        [
+            "A/B compare (baseline vs candidate) — recommended for prompt editing",
+            "Single run (local prompts) — quick check",
+            "Single run (remote prompts URL) — test what the app fetches",
+        ],
+        default="A/B compare (baseline vs candidate) — recommended for prompt editing",
+    )
+
+    print("\nFixture count (what 'max fixtures' means)")
+    print("- Fixtures are the text files in tools/prompt_workbench/fixtures/<mode>/*.txt")
+    print("- max fixtures = how many of those test inputs to run")
+    print("- Use 1–3 while iterating; use 0 to run ALL for confidence")
+    max_fx = _prompt_int("How many fixtures to run? (0 = all)", default=3, min_v=0, max_v=200)
+
+    argv: List[str] = ["--mode", mode]
+    if max_fx > 0:
+        argv += ["--max-fixtures", str(max_fx)]
+
+    # Always try to load local env first (.env.local) but env vars still win.
+    argv += ["--load-env"]
+
+    if run_type.startswith("Single run (remote"):
+        url = input(f"Remote prompts URL [{default_prompts_url}]: ").strip() or default_prompts_url
+        argv += ["--prompts-url", url]
+        return main_argv(argv)
+
+    if run_type.startswith("A/B compare"):
+        argv += ["--baseline-prompts-path", "baseline_prompts.json"]
+        argv += ["--candidate-prompts-path", "candidate_prompts.json"]
+        return main_argv(argv)
+
+    # Single run (local prompts)
+    return main_argv(argv)
+
+
+# Split core execution so interactive can call it
+
+def _try_open_path(path: Path) -> None:
+    """Best-effort open a file or folder using the OS default handler."""
+    try:
+        if sys.platform.startswith("win"):
+            os.startfile(str(path))  # type: ignore[attr-defined]
+            return
+        # mac/linux best-effort
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+    except Exception:
+        pass
+
+
+def main_argv(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(description="Prompt Workbench")
+    parser.add_argument("--app-id", type=str, default="", help="Optional appId used for prompts/fixtures defaults")
+    parser.add_argument("--mode", required=True, choices=MODES)
+    parser.add_argument("--model", default="gpt-4o-mini")
+    parser.add_argument("--temperature", type=float, default=0.4)
+    parser.add_argument("--max-output-tokens", type=int, default=200)
+    parser.add_argument("--max-fixtures", type=int, default=0, help="0 = all")
+
+    parser.add_argument("--fixtures-dir", type=str, default="", help="Override fixtures dir (defaults to ./fixtures)")
+
+    # Single-run prompt source
+    parser.add_argument("--prompts-path", type=str, default="")
+    parser.add_argument("--prompts-url", type=str, default="")
+
+    # A/B compare
+    parser.add_argument("--baseline-prompts-path", type=str, default="")
+    parser.add_argument("--baseline-prompts-url", type=str, default="")
+    parser.add_argument("--candidate-prompts-path", type=str, default="")
+    parser.add_argument("--candidate-prompts-url", type=str, default="")
+
+    # Optional override system prompt text directly
+    parser.add_argument("--system-override-file", type=str, default="")
+
+    # Utility
+    parser.add_argument("--validate-only", action="store_true")
+    parser.add_argument("--dry-run", action="store_true", help="No OpenAI calls. Writes placeholder outputs + manifest.")
+    parser.add_argument(
+        "--load-env",
+        action="store_true",
+        help="Load OPENAI_API_KEY (and other vars) from .env.local/.env in the workbench folder (gitignored).",
+    )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the output folder (and ab_report.html for A/B runs) after the run completes.",
+    )
+
+    args = parser.parse_args(list(argv))
+
+    # Determine run mode: A/B or single.
+    ab_enabled = any(
+        [
+            args.baseline_prompts_path,
+            args.baseline_prompts_url,
+            args.candidate_prompts_path,
+            args.candidate_prompts_url,
+        ]
+    )
+
+    if ab_enabled:
+        if not (args.baseline_prompts_path or args.baseline_prompts_url):
+            raise ValueError("A/B enabled: provide --baseline-prompts-path or --baseline-prompts-url")
+        if not (args.candidate_prompts_path or args.candidate_prompts_url):
+            raise ValueError("A/B enabled: provide --candidate-prompts-path or --candidate-prompts-url")
+
+    # Load local env BEFORE key checks.
+    if args.load_env:
+        here = Path(__file__).resolve().parent
+        _load_dotenv_if_present(here / ".env.local")
+        _load_dotenv_if_present(here / ".env")
+
+    # Repo paths
+    repo_root = _repo_root()
+
+    # Default prompt path (used if caller doesn't provide --prompts-path / --prompts-url)
+    app_id = (args.app_id or "").strip()
+    if app_id:
+        default_prompts_path = repo_root / "prompts" / f"{app_id}.json"
+    else:
+        # Best-effort: use the first prompts/*.json file
+        candidates = sorted((repo_root / "prompts").glob("*.json"))
+        default_prompts_path = candidates[0] if candidates else (repo_root / "prompts" / "template.json")
+
+    # Load fixtures
+    fixtures_dir = Path(args.fixtures_dir).resolve() if args.fixtures_dir else (repo_root / "fixtures")
+    fixtures = load_fixtures(fixtures_dir, args.mode, app_id=app_id)
+    if args.max_fixtures and args.max_fixtures > 0:
+        fixtures = fixtures[: args.max_fixtures]
+
+    # Convenience map for printing inputs later
+    fixture_input_by_name = {name: text for (name, text) in fixtures}
+
+    if args.validate_only:
+        # Validate prompt loading (single-run only) + fixtures presence.
+        bundle, source_kind, source_id = load_prompts_bundle(
+            prompts_path=Path(args.prompts_path).resolve() if args.prompts_path else None,
+            prompts_url=args.prompts_url,
+            default_prompts_path=default_prompts_path,
+        )
+        sp = system_prompt_for_mode(bundle, args.mode)
+        if args.system_override_file:
+            sp = _read_text_file(Path(args.system_override_file))
+
+        print(f"OK: fixtures loaded: {len(fixtures)} for mode={args.mode}")
+        print(f"OK: prompts loaded: {source_kind} {source_id}")
+        print(f"System prompt sha256={_sha256_text(sp)[:12]}…")
+        return 0
+
+    if args.dry_run:
+        # Dry run: ensure we can load prompts/fixtures and write artifacts without network.
+        out_root = Path(__file__).resolve().parent / "out" / _utc_timestamp_slug()
+        out_root.mkdir(parents=True, exist_ok=True)
+
+        git_sha = _try_git_head_sha(repo_root)
+        manifest: Dict[str, Any] = {
+            "startedAtUtc": _utc_now_iso(),
+            "mode": args.mode,
+            "model": args.model,
+            "temperature": args.temperature,
+            "maxOutputTokens": args.max_output_tokens,
+            "fixturesDir": str(fixtures_dir),
+            "fixtures": [name for (name, _) in fixtures],
+            "gitHeadSha": git_sha,
+            "dryRun": True,
+        }
+
+        # Load prompt (single-run only)
+        bundle, source_kind, source_id = load_prompts_bundle(
+            prompts_path=Path(args.prompts_path).resolve() if args.prompts_path else None,
+            prompts_url=args.prompts_url,
+            default_prompts_path=default_prompts_path,
+        )
+        system_prompt = system_prompt_for_mode(bundle, args.mode)
+        if args.system_override_file:
+            system_prompt = _read_text_file(Path(args.system_override_file))
+
+        manifest.update(
+            {
+                "promptsSourceKind": source_kind,
+                "promptsSourceId": source_id,
+                "systemPromptSha256": _sha256_text(system_prompt),
+                "promptsUpdatedAt": bundle.updated_at,
+                "promptsTtlSeconds": bundle.ttl_seconds,
+            }
+        )
+
+        # Write placeholder outputs.
+        results: Dict[str, Dict[str, Any]] = {}
+        for (name, _) in fixtures:
+            placeholder = f"[DRY_RUN] fixture={name} mode={args.mode}"
+            flags = basic_heuristic_flags(args.mode, placeholder)
+            write_output(out_root / "single", args.mode, name, placeholder)
+            results[name] = {"output": placeholder, "error": None, "flags": flags, "chars": len(placeholder)}
+
+        write_text(out_root / "run.json", json.dumps(manifest, indent=2))
+        write_text(out_root / "summary.json", json.dumps(results, indent=2))
+        print(f"Out={out_root}")
+        print("Done")
+        return 0
+
+    # Real run requires key
+    ensure_api_key()
+
+    out_root = Path(__file__).resolve().parent / "out" / _utc_timestamp_slug()
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    git_sha = _try_git_head_sha(repo_root)
+
+    manifest: Dict[str, Any] = {
+        "startedAtUtc": _utc_now_iso(),
+        "mode": args.mode,
+        "model": args.model,
+        "temperature": args.temperature,
+        "maxOutputTokens": args.max_output_tokens,
+        "fixturesDir": str(fixtures_dir),
+        "fixtures": [name for (name, _) in fixtures],
+        "gitHeadSha": git_sha,
+    }
+
+    if not ab_enabled:
+        bundle, source_kind, source_id = load_prompts_bundle(
+            prompts_path=Path(args.prompts_path).resolve() if args.prompts_path else None,
+            prompts_url=args.prompts_url,
+            default_prompts_path=default_prompts_path,
+        )
+        system_prompt = system_prompt_for_mode(bundle, args.mode)
+        if args.system_override_file:
+            system_prompt = _read_text_file(Path(args.system_override_file))
+
+        manifest.update(
+            {
+                "promptsSourceKind": source_kind,
+                "promptsSourceId": source_id,
+                "systemPromptSha256": _sha256_text(system_prompt),
+                "promptsUpdatedAt": bundle.updated_at,
+                "promptsTtlSeconds": bundle.ttl_seconds,
+            }
+        )
+
+        results = run_one(
+            mode=args.mode,
+            model=args.model,
+            temperature=args.temperature,
+            max_output_tokens=args.max_output_tokens,
+            system_prompt=system_prompt,
+            fixtures=fixtures,
+            out_root=out_root,
+            variant="single",
+        )
+
+        write_text(out_root / "run.json", json.dumps(manifest, indent=2))
+        write_text(out_root / "summary.json", json.dumps(results, indent=2))
+        print(f"Out={out_root}")
+        for name, r in results.items():
+            flags = r["flags"]
+            flag_str = (" flags=" + ",".join(flags)) if flags else ""
+            err = r["error"]
+            err_str = f" error={err}" if err else ""
+            print(f"- {name}: {r['chars']} chars{flag_str}{err_str}")
+
+            # Show input + output for the fixture (terminal-friendly, short)
+            inp = fixture_input_by_name.get(name, "")
+            if inp:
+                print("  INPUT:")
+                print("  " + "\n  ".join(inp.splitlines()))
+            out_txt = r.get("output") or ("[ERROR] " + err if err else "")
+            if out_txt:
+                print("  OUTPUT:")
+                print("  " + "\n  ".join(str(out_txt).splitlines()))
+        print("Done")
+        return 0
+
+    # A/B mode
+    baseline_bundle, baseline_kind, baseline_id = load_prompts_bundle(
+        prompts_path=Path(args.baseline_prompts_path).resolve() if args.baseline_prompts_path else None,
+        prompts_url=args.baseline_prompts_url,
+        default_prompts_path=default_prompts_path,
+    )
+    candidate_bundle, candidate_kind, candidate_id = load_prompts_bundle(
+        prompts_path=Path(args.candidate_prompts_path).resolve() if args.candidate_prompts_path else None,
+        prompts_url=args.candidate_prompts_url,
+        default_prompts_path=default_prompts_path,
+    )
+
+    baseline_sp = system_prompt_for_mode(baseline_bundle, args.mode)
+    candidate_sp = system_prompt_for_mode(candidate_bundle, args.mode)
+
+    if args.system_override_file:
+        # If you override, it applies to BOTH (useful for quick experiments).
+        override = _read_text_file(Path(args.system_override_file))
+        baseline_sp = override
+        candidate_sp = override
+
+    manifest.update(
+        {
+            "ab": {
+                "baseline": {
+                    "promptsSourceKind": baseline_kind,
+                    "promptsSourceId": baseline_id,
+                    "promptsUpdatedAt": baseline_bundle.updated_at,
+                    "systemPromptSha256": _sha256_text(baseline_sp),
+                },
+                "candidate": {
+                    "promptsSourceKind": candidate_kind,
+                    "promptsSourceId": candidate_id,
+                    "promptsUpdatedAt": candidate_bundle.updated_at,
+                    "systemPromptSha256": _sha256_text(candidate_sp),
+                },
+            }
+        }
+    )
+
+    baseline_results = run_one(
+        mode=args.mode,
+        model=args.model,
+        temperature=args.temperature,
+        max_output_tokens=args.max_output_tokens,
+        system_prompt=baseline_sp,
+        fixtures=fixtures,
+        out_root=out_root,
+        variant="baseline",
+    )
+    candidate_results = run_one(
+        mode=args.mode,
+        model=args.model,
+        temperature=args.temperature,
+        max_output_tokens=args.max_output_tokens,
+        system_prompt=candidate_sp,
+        fixtures=fixtures,
+        out_root=out_root,
+        variant="candidate",
+    )
+
+    diffs_dir = out_root / "diffs" / args.mode
+    diffs_dir.mkdir(parents=True, exist_ok=True)
+
+    diff_index: Dict[str, Any] = {}
+    for name, _ in fixtures:
+        a = baseline_results[name]["output"] or ""
+        b = candidate_results[name]["output"] or ""
+        d = unified_diff(a, b, a_label=f"baseline/{name}", b_label=f"candidate/{name}")
+        write_text(diffs_dir / f"{name}.diff.txt", d if d.strip() else "[NO DIFF]\n")
+
+        diff_index[name] = {
+            "baseline": baseline_results[name],
+            "candidate": candidate_results[name],
+            "diffFile": str((diffs_dir / f"{name}.diff.txt").resolve()),
+        }
+
+    # Human-friendly summary report
+    try:
+        report_path = write_ab_report_html(
+            out_root=out_root,
+            mode=args.mode,
+            fixtures=[n for (n, _) in fixtures],
+            diff_index=diff_index,
+        )
+        manifest["abReportHtml"] = str(report_path.resolve())
+    except Exception:
+        # Report generation must never fail the run.
+        pass
+
+    # Persist manifest AFTER we may have added abReportHtml
+    write_text(out_root / "run.json", json.dumps(manifest, indent=2))
+    write_text(out_root / "ab_summary.json", json.dumps(diff_index, indent=2))
+
+    print(f"Out={out_root}")
+    if manifest.get("abReportHtml"):
+        print(f"ReportHtml={manifest['abReportHtml']}")
+
+    for name in [n for (n, _) in fixtures]:
+        b = baseline_results[name]
+        c = candidate_results[name]
+        bflags = b["flags"]
+        cflags = c["flags"]
+        print(
+            f"- {name}: base={b['chars']} chars"
+            f" cand={c['chars']} chars"
+            f" baseFlags={','.join(bflags) if bflags else '-'}"
+            f" candFlags={','.join(cflags) if cflags else '-'}"
+        )
+
+        inp = fixture_input_by_name.get(name, "")
+        if inp:
+            print("  INPUT:")
+            print("  " + "\n  ".join(inp.splitlines()))
+
+        bout = b.get("output") or ("[ERROR] " + b.get("error") if b.get("error") else "")
+        cout = c.get("output") or ("[ERROR] " + c.get("error") if c.get("error") else "")
+
+        if bout:
+            print("  BASELINE:")
+            print("  " + "\n  ".join(str(bout).splitlines()))
+        if cout:
+            print("  CANDIDATE:")
+            print("  " + "\n  ".join(str(cout).splitlines()))
+
+        df = diff_index.get(name, {}).get("diffFile")
+        if df:
+            print(f"  DIFF={df}")
+
+    if args.open:
+        report = out_root / "ab_report.html"
+        _try_open_path(report if report.exists() else out_root)
+
+    print("Done")
+    return 0
+
+
+def main() -> int:
+    # If no args were provided, go interactive.
+    if len(sys.argv) == 1:
+        return interactive_flow(
+            default_prompts_url="https://raw.githubusercontent.com/mloispro/axis-ai-prompts/main/prompts/rizzchatai.json"
+        )
+
+    return main_argv(sys.argv[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

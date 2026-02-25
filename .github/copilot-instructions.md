@@ -19,6 +19,11 @@
 - Outputs are written to `out/<runId>/...` for diffing/regression checks.
 - Reads API key from `OPENAI_API_KEY` environment variable (never write keys to disk).
 
+### Optional web workbench
+- Entry: `workbench/server.py` (FastAPI + Uvicorn).
+- Local draft candidates are stored under `workbench/state/` (gitignored).
+- Outputs are written under `workbench/out/` (gitignored).
+
 ## Common dev commands (Windows)
 - Run workbench selftest (no API calls):
   - `python .\\tools\\workbench\\workbench.py selftest`

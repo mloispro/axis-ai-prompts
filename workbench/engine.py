@@ -89,8 +89,23 @@ def _read_text_file(path: Path) -> str:
 
 def _fetch_url_bytes(url: str, timeout_s: int = 15) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "RizzChatAI-PromptWorkbench/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        return resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        # Include a short response snippet; many backends return useful JSON for auth errors
+        # (e.g. "invalid_client_id").
+        try:
+            body_bytes = e.read()  # type: ignore[no-untyped-call]
+        except Exception:
+            body_bytes = b""
+        body_text = body_bytes.decode("utf-8", errors="replace").strip()
+        if len(body_text) > 2000:
+            body_text = body_text[:2000] + "…"
+        msg = f"Failed to fetch URL {url} (HTTP {getattr(e, 'code', '?')}): {body_text or getattr(e, 'reason', '')}"
+        raise RuntimeError(msg) from e
+    except urllib.error.URLError as e:
+        raise RuntimeError(f"Failed to fetch URL {url}: {getattr(e, 'reason', e)}") from e
 
 
 def _try_git_head_sha(cwd: Path) -> Optional[str]:

@@ -40,7 +40,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 
 def _find_repo_root(start: pathlib.Path) -> pathlib.Path:
@@ -106,18 +106,29 @@ def _prompt_for_mode(prompt_json: dict, mode: str) -> str:
     raise SystemExit(f"Unknown mode '{mode}'. Expected opener|app_chat|reg_chat")
 
 
-def _fixture_paths_for_mode(mode: str) -> List[pathlib.Path]:
-    mode_key = mode.lower().replace(" ", "_")
-    folder = FIXTURES_DIR / mode_key
-    if not folder.exists():
-        # Also allow "app chat" → app_chat, "reg chat" → reg_chat
-        folder = FIXTURES_DIR / mode.lower().strip().replace(" ", "_")
+def _fixture_dir_for_mode(mode: str) -> pathlib.Path:
+    mode_key = mode.lower().strip().replace(" ", "_")
+    return FIXTURES_DIR / mode_key
+
+
+def _select_fixtures(mode: str, only: Optional[str]) -> List[pathlib.Path]:
+    folder = _fixture_dir_for_mode(mode)
     if not folder.exists():
         raise SystemExit(f"Fixtures folder not found: {folder}")
+
     files = sorted([p for p in folder.glob("*.txt") if p.is_file()])
     if not files:
         raise SystemExit(f"No .txt fixtures found in {folder}")
-    return files
+
+    if not only:
+        return files
+
+    # allow passing either the full filename or just the stem
+    only_norm = only.strip()
+    matched = [p for p in files if p.name == only_norm or p.stem == only_norm]
+    if not matched:
+        raise SystemExit(f"No fixture matched '{only}'. Available: {[p.name for p in files]}")
+    return matched
 
 
 def _openai_api_key() -> str:
@@ -214,36 +225,57 @@ def _sanitize_filename(name: str) -> str:
     return "".join(keep)
 
 
-def cmd_run(args: argparse.Namespace) -> pathlib.Path:
-    prompt_path = PROMPTS_DIR / f"{args.app}.json"
-    if not prompt_path.exists():
-        raise SystemExit(f"Prompt file not found: {prompt_path}")
+def _load_prompt_json(app: Optional[str], prompts_file: Optional[str]) -> Tuple[dict, pathlib.Path]:
+    if prompts_file:
+        path = pathlib.Path(prompts_file)
+        if not path.is_absolute():
+            path = (REPO_ROOT / prompts_file).resolve()
+        if not path.exists():
+            raise SystemExit(f"Prompt file not found: {path}")
+        return _load_json(path), path
 
-    prompt_json = _load_json(prompt_path)
+    if not app:
+        raise SystemExit("Provide --app or --prompts-file")
+
+    path = PROMPTS_DIR / f"{app}.json"
+    if not path.exists():
+        raise SystemExit(f"Prompt file not found: {path}")
+    return _load_json(path), path
+
+
+def cmd_run(args: argparse.Namespace) -> pathlib.Path:
+    prompt_json, prompt_path = _load_prompt_json(args.app, args.prompts_file)
+
     system_prompt = _prompt_for_mode(prompt_json, args.mode)
     if not system_prompt.strip():
         raise SystemExit(f"System prompt for mode '{args.mode}' is blank in {prompt_path.name}")
 
-    fixtures = _fixture_paths_for_mode(args.mode)
+    fixtures = _select_fixtures(args.mode, args.fixture)
 
     run_id = _utc_run_id()
-    run_dir = OUT_DIR / run_id / f"{args.app}_{args.mode.replace(' ', '_')}"
+    label = args.label.strip() if args.label else (args.app or prompt_path.stem)
+    safe_label = _sanitize_filename(label)
+    run_dir = OUT_DIR / run_id / f"{safe_label}_{args.mode.replace(' ', '_')}"
     run_dir.mkdir(parents=True, exist_ok=True)
 
     api_key = None if args.dry_run else _openai_api_key()
 
+    failures: List[dict] = []
+
     manifest = {
         "runId": run_id,
         "timestampUtc": run_id,
+        "label": label,
         "app": args.app,
         "mode": args.mode,
         "model": args.model,
         "temperature": args.temperature,
         "maxTokens": args.max_tokens,
-        "promptFile": str(prompt_path.relative_to(REPO_ROOT)).replace("\\", "/"),
+        "promptFile": str(prompt_path).replace("\\", "/"),
         "systemPromptSha": _hash_text(system_prompt),
         "fixtures": [p.name for p in fixtures],
         "dryRun": bool(args.dry_run),
+        "continueOnError": bool(args.continue_on_error),
     }
     _write_run_manifest(run_dir, manifest)
 
@@ -253,8 +285,8 @@ def cmd_run(args: argparse.Namespace) -> pathlib.Path:
         user_prompt = _read_text(fx)
         if args.dry_run:
             content = "[DRY RUN]"
+            error = None
         else:
-            # simple retry for 429-ish transient failures
             try:
                 content = _openai_chat_completion(
                     api_key=api_key,
@@ -264,30 +296,53 @@ def cmd_run(args: argparse.Namespace) -> pathlib.Path:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                 )
+                error = None
             except RuntimeError as e:
                 msg = str(e)
+                # simple retry for rate limit
                 if "HTTP 429" in msg:
                     time.sleep(2)
-                    content = _openai_chat_completion(
-                        api_key=api_key,
-                        model=args.model,
-                        temperature=args.temperature,
-                        max_tokens=args.max_tokens,
-                        system_prompt=system_prompt,
-                        user_prompt=user_prompt,
-                    )
+                    try:
+                        content = _openai_chat_completion(
+                            api_key=api_key,
+                            model=args.model,
+                            temperature=args.temperature,
+                            max_tokens=args.max_tokens,
+                            system_prompt=system_prompt,
+                            user_prompt=user_prompt,
+                        )
+                        error = None
+                    except RuntimeError as e2:
+                        content = ""
+                        error = str(e2)
                 else:
-                    raise
+                    content = ""
+                    error = msg
 
-        flags = _basic_flags(args.mode, content)
+        flags = _basic_flags(args.mode, content) if content else []
 
         out_name = _sanitize_filename(fx.stem) + ".txt"
-        (run_dir / out_name).write_text(content, encoding="utf-8")
+        if content:
+            (run_dir / out_name).write_text(content, encoding="utf-8")
+
+        if error:
+            failures.append({"fixture": fx.name, "error": error})
+            (run_dir / (fx.stem + ".error.txt")).write_text(error, encoding="utf-8")
 
         print("\n" + "=" * 80)
         print(f"Fixture: {fx.name}  Flags: {flags or 'none'}")
+        if error:
+            print(f"ERROR: {error}")
+            if not args.continue_on_error:
+                raise SystemExit(error)
+            continue
+
         print("-" * 80)
         print(content[:2000] + ("\n...[truncated]" if len(content) > 2000 else ""))
+
+    # update manifest with failures
+    manifest["failures"] = failures
+    _write_run_manifest(run_dir, manifest)
 
     return run_dir
 
@@ -307,19 +362,27 @@ def _load_outputs(run_dir: pathlib.Path) -> Dict[str, str]:
 def cmd_ab(args: argparse.Namespace) -> int:
     # A/B runs: same fixtures, two prompt files.
     a_args = argparse.Namespace(
-        app=args.appA,
+        app=None,
+        prompts_file=args.promptsA,
+        label=args.labelA,
         mode=args.mode,
         model=args.model,
         temperature=args.temperature,
         max_tokens=args.max_tokens,
+        fixture=args.fixture,
+        continue_on_error=args.continue_on_error,
         dry_run=args.dry_run,
     )
     b_args = argparse.Namespace(
-        app=args.appB,
+        app=None,
+        prompts_file=args.promptsB,
+        label=args.labelB,
         mode=args.mode,
         model=args.model,
         temperature=args.temperature,
         max_tokens=args.max_tokens,
+        fixture=args.fixture,
+        continue_on_error=args.continue_on_error,
         dry_run=args.dry_run,
     )
 
@@ -330,7 +393,7 @@ def cmd_ab(args: argparse.Namespace) -> int:
     b_out = _load_outputs(b_dir)
 
     run_id = _utc_run_id()
-    diff_dir = OUT_DIR / run_id / f"diff_{args.appA}_vs_{args.appB}_{args.mode.replace(' ', '_')}"
+    diff_dir = OUT_DIR / run_id / f"diff_{_sanitize_filename(args.labelA)}_vs_{_sanitize_filename(args.labelB)}_{args.mode.replace(' ', '_')}"
     diff_dir.mkdir(parents=True, exist_ok=True)
 
     all_keys = sorted(set(a_out.keys()) | set(b_out.keys()))
@@ -351,8 +414,8 @@ def cmd_ab(args: argparse.Namespace) -> int:
         diff = difflib.unified_diff(
             a_out[k].splitlines(keepends=True),
             b_out[k].splitlines(keepends=True),
-            fromfile=f"A/{k}.txt",
-            tofile=f"B/{k}.txt",
+            fromfile=f"{args.labelA}/{k}.txt",
+            tofile=f"{args.labelB}/{k}.txt",
         )
         (diff_dir / f"{_sanitize_filename(k)}.diff").write_text("".join(diff), encoding="utf-8")
 
@@ -397,21 +460,29 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     run = sub.add_parser("run", help="Run fixtures for a mode")
-    run.add_argument("--app", required=True, help="Prompt file name under prompts/ (without .json)")
+    run.add_argument("--app", help="Prompt file name under prompts/ (without .json)")
+    run.add_argument("--prompts-file", help="Path to a prompt JSON file (overrides --app)")
+    run.add_argument("--label", help="Run label used in output folder name")
     run.add_argument("--mode", required=True, help="opener | app_chat | reg_chat")
     run.add_argument("--model", default=DEFAULT_MODEL)
     run.add_argument("--temperature", type=float, default=0.3)
     run.add_argument("--max-tokens", type=int, default=160)
+    run.add_argument("--fixture", help="Run only one fixture (filename or stem)")
+    run.add_argument("--continue-on-error", action="store_true", help="Continue remaining fixtures if one fails")
     run.add_argument("--dry-run", action="store_true", help="No network calls; writes placeholders")
     run.set_defaults(func=cmd_run_entry)
 
     ab = sub.add_parser("ab", help="Run A/B and write diffs")
-    ab.add_argument("--appA", required=True)
-    ab.add_argument("--appB", required=True)
+    ab.add_argument("--promptsA", required=True, help="Prompt JSON for variant A")
+    ab.add_argument("--promptsB", required=True, help="Prompt JSON for variant B")
+    ab.add_argument("--labelA", default="A")
+    ab.add_argument("--labelB", default="B")
     ab.add_argument("--mode", required=True)
     ab.add_argument("--model", default=DEFAULT_MODEL)
     ab.add_argument("--temperature", type=float, default=0.3)
     ab.add_argument("--max-tokens", type=int, default=160)
+    ab.add_argument("--fixture", help="Run only one fixture")
+    ab.add_argument("--continue-on-error", action="store_true")
     ab.add_argument("--dry-run", action="store_true")
     ab.set_defaults(func=cmd_ab)
 
@@ -421,14 +492,25 @@ def build_parser() -> argparse.ArgumentParser:
     selftest = sub.add_parser("selftest", help="Dry-run smoke test")
     selftest.set_defaults(func=cmd_selftest)
 
+    ls = sub.add_parser("list", help="List prompt files and fixtures")
+    ls.add_argument("--verbose", action="store_true")
+    ls.set_defaults(func=cmd_list)
+
     return p
 
 
-def main(argv: Optional[List[str]] = None) -> int:
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    return int(args.func(args))
+def cmd_list(args: argparse.Namespace) -> int:
+    # List prompt files and fixtures.
+    print(f"Repo: {REPO_ROOT}")
+    print("\nPrompt files:")
+    for p in sorted(PROMPTS_DIR.glob("*.json")):
+        print(f"- {p.stem}")
 
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+    print("\nFixture modes:")
+    for d in sorted([p for p in FIXTURES_DIR.iterdir() if p.is_dir()]):
+        txts = sorted(d.glob("*.txt"))
+        print(f"- {d.name} ({len(txts)} fixtures)")
+        if args.verbose:
+            for t in txts:
+                print(f"    - {t.name}")
+    return 0

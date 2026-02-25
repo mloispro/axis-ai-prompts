@@ -9,7 +9,8 @@ This repo is designed to support multiple apps. Each app has its own prompt file
 - `prompts/`
   - One JSON file per app (recommended)
 - `fixtures/`
-  - Optional prompt workbench fixtures (sample inputs)
+  - Optional prompt workbench fixtures (sample inputs), ideally scoped per app:
+    - `fixtures/<appId>/<mode>/*.txt`
 - `tools/`
   - Optional desktop workbench scripts
 

@@ -9,7 +9,7 @@ No secrets are stored. API key is read from OPENAI_API_KEY env var.
 
 Repo conventions
 - Prompt files: prompts/<app>.json
-- Fixtures: fixtures/<mode>/*.txt
+- Fixtures: fixtures/<app>/<mode>/*.txt (preferred) OR fixtures/<mode>/*.txt (legacy)
 - Outputs: out/<runId>/...
 
 JSON shape expected for RizzChatAI-style prompts:
@@ -95,19 +95,41 @@ def _prompt_for_mode(prompt_json: dict, mode: str) -> str:
     raise SystemExit(f"Unknown mode '{mode}'. Expected opener|app_chat|reg_chat")
 
 
-def _fixture_dir_for_mode(mode: str) -> pathlib.Path:
-    mode_key = mode.lower().strip().replace(" ", "_")
-    return FIXTURES_DIR / mode_key
+def _mode_key(mode: str) -> str:
+        return mode.lower().strip().replace(" ", "_")
 
 
-def _select_fixtures(mode: str, only: Optional[str]) -> List[pathlib.Path]:
-    folder = _fixture_dir_for_mode(mode)
-    if not folder.exists():
-        raise SystemExit(f"Fixtures folder not found: {folder}")
+def _fixture_dirs_for_mode(mode: str, app: Optional[str]) -> List[pathlib.Path]:
+        """Return fixture search dirs in priority order.
 
-    files = sorted([p for p in folder.glob("*.txt") if p.is_file()])
+        Preferred layout is app-scoped:
+            fixtures/<app>/<mode>/*.txt
+
+        Legacy layout (still supported):
+            fixtures/<mode>/*.txt
+        """
+        key = _mode_key(mode)
+        dirs: List[pathlib.Path] = []
+        if app:
+                dirs.append(FIXTURES_DIR / app / key)
+        dirs.append(FIXTURES_DIR / key)
+        return dirs
+
+
+def _select_fixtures(mode: str, only: Optional[str], app: Optional[str]) -> List[pathlib.Path]:
+    searched: List[pathlib.Path] = []
+    files: List[pathlib.Path] = []
+    for folder in _fixture_dirs_for_mode(mode, app):
+        searched.append(folder)
+        if not folder.exists():
+            continue
+        files = sorted([p for p in folder.glob("*.txt") if p.is_file()])
+        if files:
+            break
+
     if not files:
-        raise SystemExit(f"No .txt fixtures found in {folder}")
+        searched_str = ", ".join(str(p) for p in searched)
+        raise SystemExit(f"No .txt fixtures found for mode '{mode}'. Searched: {searched_str}")
 
     if not only:
         return files
@@ -239,7 +261,7 @@ def cmd_run(args: argparse.Namespace) -> pathlib.Path:
     if not system_prompt.strip():
         raise SystemExit(f"System prompt for mode '{args.mode}' is blank in {prompt_path.name}")
 
-    fixtures = _select_fixtures(args.mode, args.fixture)
+    fixtures = _select_fixtures(args.mode, args.fixture, args.app)
 
     run_id = _utc_run_id()
     label = args.label.strip() if args.label else (args.app or prompt_path.stem)
@@ -499,13 +521,31 @@ def cmd_list(args: argparse.Namespace) -> int:
     for p in sorted(PROMPTS_DIR.glob("*.json")):
         print(f"- {p.stem}")
 
-    print("\nFixture modes:")
-    for d in sorted([p for p in FIXTURES_DIR.iterdir() if p.is_dir()]):
-        txts = sorted(d.glob("*.txt"))
-        print(f"- {d.name} ({len(txts)} fixtures)")
-        if args.verbose:
-            for t in txts:
-                print(f"    - {t.name}")
+    print("\nFixtures:")
+    known_modes = {"opener", "app_chat", "reg_chat"}
+
+    # 1) App-scoped fixtures: fixtures/<app>/<mode>/*.txt
+    app_dirs = sorted([p for p in FIXTURES_DIR.iterdir() if p.is_dir() and p.name not in known_modes])
+    if app_dirs:
+        print("App-scoped:")
+        for app_dir in app_dirs:
+            for mode in sorted([p for p in app_dir.iterdir() if p.is_dir()]):
+                txts = sorted(mode.glob("*.txt"))
+                print(f"- {app_dir.name}/{mode.name} ({len(txts)} fixtures)")
+                if args.verbose:
+                    for t in txts:
+                        print(f"    - {t.name}")
+
+    # 2) Legacy fixtures: fixtures/<mode>/*.txt
+    legacy_dirs = sorted([FIXTURES_DIR / m for m in known_modes if (FIXTURES_DIR / m).is_dir()])
+    if legacy_dirs:
+        print("Legacy:")
+        for d in legacy_dirs:
+            txts = sorted(d.glob("*.txt"))
+            print(f"- {d.name} ({len(txts)} fixtures)")
+            if args.verbose:
+                for t in txts:
+                    print(f"    - {t.name}")
     return 0
 
 

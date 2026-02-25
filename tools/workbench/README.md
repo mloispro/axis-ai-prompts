@@ -22,12 +22,17 @@ python .\tools\workbench\workbench.py run --app rizzchatai --mode opener
 A/B compare two prompt files (or two apps) across the same fixtures:
 
 ```powershell
-python .\tools\workbench\workbench.py ab --appA rizzchatai --appB rizzchatai --mode opener
+python .\tools\workbench\workbench.py ab --promptsA .\prompts\rizzchatai.json --promptsB .\prompts\rizzchatai.json --mode opener
 ```
 
 ## Fixtures
 
 Place fixture files under:
+- `fixtures/<appId>/opener/*.txt`
+- `fixtures/<appId>/app_chat/*.txt`
+- `fixtures/<appId>/reg_chat/*.txt`
+
+Legacy layout is also supported:
 - `fixtures/opener/*.txt`
 - `fixtures/app_chat/*.txt`
 - `fixtures/reg_chat/*.txt`

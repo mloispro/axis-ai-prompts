@@ -15,7 +15,7 @@
 
 ### Desktop CLI workbench
 - Entry: `tools/workbench/workbench.py` (Python).
-- Fixtures live under `fixtures/<mode>/*.txt` where mode is `opener`, `app_chat`, or `reg_chat`.
+- Fixtures live under `fixtures/<appId>/<mode>/*.txt` (preferred). Legacy `fixtures/<mode>/*.txt` is also supported.
 - Outputs are written to `out/<runId>/...` for diffing/regression checks.
 - Reads API key from `OPENAI_API_KEY` environment variable (never write keys to disk).
 

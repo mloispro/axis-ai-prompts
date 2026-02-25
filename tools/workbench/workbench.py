@@ -40,9 +40,23 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
+
+def _find_repo_root(start: pathlib.Path) -> pathlib.Path:
+    """Find repo root by walking up until we find expected folders."""
+    cur = start
+    for _ in range(8):
+        if (cur / "prompts").is_dir() and (cur / "fixtures").is_dir():
+            return cur
+        cur = cur.parent
+    raise SystemExit(
+        "Could not locate repo root (expected folders 'prompts/' and 'fixtures/'). "
+        "Run this script from within the repo or keep the standard layout."
+    )
+
+
+REPO_ROOT = _find_repo_root(pathlib.Path(__file__).resolve())
 PROMPTS_DIR = REPO_ROOT / "prompts"
 FIXTURES_DIR = REPO_ROOT / "fixtures"
 OUT_DIR = REPO_ROOT / "out"
@@ -200,7 +214,7 @@ def _sanitize_filename(name: str) -> str:
     return "".join(keep)
 
 
-def cmd_run(args: argparse.Namespace) -> int:
+def cmd_run(args: argparse.Namespace) -> pathlib.Path:
     prompt_path = PROMPTS_DIR / f"{args.app}.json"
     if not prompt_path.exists():
         raise SystemExit(f"Prompt file not found: {prompt_path}")
@@ -275,6 +289,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("-" * 80)
         print(content[:2000] + ("\n...[truncated]" if len(content) > 2000 else ""))
 
+    return run_dir
+
+
+def cmd_run_entry(args: argparse.Namespace) -> int:
+    cmd_run(args)
     return 0
 
 
@@ -287,9 +306,7 @@ def _load_outputs(run_dir: pathlib.Path) -> Dict[str, str]:
 
 def cmd_ab(args: argparse.Namespace) -> int:
     # A/B runs: same fixtures, two prompt files.
-    # We run A then B, then diff outputs.
-
-    tmp_args = argparse.Namespace(
+    a_args = argparse.Namespace(
         app=args.appA,
         mode=args.mode,
         model=args.model,
@@ -297,30 +314,17 @@ def cmd_ab(args: argparse.Namespace) -> int:
         max_tokens=args.max_tokens,
         dry_run=args.dry_run,
     )
-    cmd_run(tmp_args)
+    b_args = argparse.Namespace(
+        app=args.appB,
+        mode=args.mode,
+        model=args.model,
+        temperature=args.temperature,
+        max_tokens=args.max_tokens,
+        dry_run=args.dry_run,
+    )
 
-    # Find the most recent run directory for appA+mode
-    # (simpler: last modified under out/)
-    def newest_run_subdir(app: str) -> pathlib.Path:
-        candidates = list(OUT_DIR.glob("*/"))
-        candidates = [c for c in candidates if c.is_dir()]
-        if not candidates:
-            raise SystemExit("No runs found under out/")
-        newest = max(candidates, key=lambda p: p.stat().st_mtime)
-        sub = newest / f"{app}_{args.mode.replace(' ', '_')}"
-        if not sub.exists():
-            # fallback: search any subdir starting with app_
-            subs = [p for p in newest.glob(f"{app}_*") if p.is_dir()]
-            if not subs:
-                raise SystemExit(f"Could not find outputs for app={app} in {newest}")
-            return subs[0]
-        return sub
-
-    a_dir = newest_run_subdir(args.appA)
-
-    tmp_args.app = args.appB
-    cmd_run(tmp_args)
-    b_dir = newest_run_subdir(args.appB)
+    a_dir = cmd_run(a_args)
+    b_dir = cmd_run(b_args)
 
     a_out = _load_outputs(a_dir)
     b_out = _load_outputs(b_dir)
@@ -359,6 +363,35 @@ def cmd_ab(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_paths(args: argparse.Namespace) -> int:
+    print(f"REPO_ROOT: {REPO_ROOT}")
+    print(f"PROMPTS_DIR: {PROMPTS_DIR}")
+    print(f"FIXTURES_DIR: {FIXTURES_DIR}")
+    print(f"OUT_DIR: {OUT_DIR}")
+    return 0
+
+
+def cmd_selftest(args: argparse.Namespace) -> int:
+    # Run a dry-run opener pass and verify outputs exist.
+    test_args = argparse.Namespace(
+        app="rizzchatai",
+        mode="opener",
+        model=DEFAULT_MODEL,
+        temperature=0.3,
+        max_tokens=24,
+        dry_run=True,
+    )
+    run_dir = cmd_run(test_args)
+    manifest = run_dir / "manifest.json"
+    txts = list(run_dir.glob("*.txt"))
+    if not manifest.exists():
+        raise SystemExit(f"Selftest failed: missing {manifest}")
+    if not txts:
+        raise SystemExit("Selftest failed: no output .txt files written")
+    print("Selftest OK")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="workbench")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -370,7 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--temperature", type=float, default=0.3)
     run.add_argument("--max-tokens", type=int, default=160)
     run.add_argument("--dry-run", action="store_true", help="No network calls; writes placeholders")
-    run.set_defaults(func=cmd_run)
+    run.set_defaults(func=cmd_run_entry)
 
     ab = sub.add_parser("ab", help="Run A/B and write diffs")
     ab.add_argument("--appA", required=True)
@@ -381,6 +414,12 @@ def build_parser() -> argparse.ArgumentParser:
     ab.add_argument("--max-tokens", type=int, default=160)
     ab.add_argument("--dry-run", action="store_true")
     ab.set_defaults(func=cmd_ab)
+
+    paths = sub.add_parser("paths", help="Print discovered repo paths")
+    paths.set_defaults(func=cmd_paths)
+
+    selftest = sub.add_parser("selftest", help="Dry-run smoke test")
+    selftest.set_defaults(func=cmd_selftest)
 
     return p
 

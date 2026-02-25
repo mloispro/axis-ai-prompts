@@ -1,0 +1,11 @@
+Assistant must tie in something about: tacos
+
+Here is the current chat conversation transcript:
+Her: ok wait you actually cook?
+Me: yeah, I can handle myself in a kitchen
+Her: what’s your specialty then
+Me: depends, what do you like
+Her: tacos and spicy food
+
+Write the next message. Don’t suggest coffee. 1–3 lines, playful, assume yes style.
+

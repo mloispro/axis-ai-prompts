@@ -1,0 +1,10 @@
+Generate a dating app opener using the following profile data:
+
+Name: Sarah
+Bio: "Dog mom. Sushi lover. Gym sometimes."
+Photos: one photo with a golden retriever
+
+Assistant must tie in something about: her dog
+
+Keep it short and copy-paste ready. No extra text, just the opener.
+

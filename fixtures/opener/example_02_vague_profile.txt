@@ -1,0 +1,10 @@
+Generate a dating app opener using the following profile data:
+
+Name: Rachel
+Bio: "Just ask"
+Interests: none listed
+
+Assistant must tie in something about: mystery
+
+Keep it short and copy-paste ready. No extra text, just the opener.
+

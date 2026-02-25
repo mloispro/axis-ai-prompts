@@ -242,7 +242,48 @@ def build_messages(system_prompt: str, user_text: str) -> List[Dict[str, Any]]:
     ]
 
 
-def call_openai(model: str, messages: List[Dict[str, Any]], temperature: float, max_output_tokens: int) -> str:
+def _usage_to_dict(usage: Any) -> Dict[str, Any]:
+    """Normalize usage from OpenAI SDK into a JSON-serializable dict.
+
+    The Responses API usage shape can vary by SDK version/model. We keep this
+    defensive and only extract fields we care about.
+    """
+
+    def _get(obj: Any, key: str) -> Any:
+        if obj is None:
+            return None
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    def _as_int(v: Any) -> Optional[int]:
+        try:
+            if v is None:
+                return None
+            return int(v)
+        except Exception:
+            return None
+
+    input_tokens = _as_int(_get(usage, "input_tokens"))
+    output_tokens = _as_int(_get(usage, "output_tokens"))
+    total_tokens = _as_int(_get(usage, "total_tokens"))
+
+    input_details = _get(usage, "input_tokens_details")
+    cached_tokens = _as_int(_get(input_details, "cached_tokens"))
+
+    out: Dict[str, Any] = {}
+    if input_tokens is not None:
+        out["inputTokens"] = input_tokens
+    if output_tokens is not None:
+        out["outputTokens"] = output_tokens
+    if total_tokens is not None:
+        out["totalTokens"] = total_tokens
+    if cached_tokens is not None:
+        out["cachedTokens"] = cached_tokens
+    return out
+
+
+def call_openai(model: str, messages: List[Dict[str, Any]], temperature: float, max_output_tokens: int) -> Tuple[str, Dict[str, Any]]:
     from openai import OpenAI
 
     client = OpenAI()
@@ -254,9 +295,11 @@ def call_openai(model: str, messages: List[Dict[str, Any]], temperature: float, 
         max_output_tokens=max_output_tokens,
     )
 
+    usage_dict = _usage_to_dict(getattr(resp, "usage", None))
+
     text = getattr(resp, "output_text", None)
     if isinstance(text, str) and text.strip():
-        return text.strip()
+        return text.strip(), usage_dict
 
     # Fallback: best-effort extraction.
     try:
@@ -267,7 +310,7 @@ def call_openai(model: str, messages: List[Dict[str, Any]], temperature: float, 
                     chunks.append(c.text)
         out = "".join(chunks).strip()
         if out:
-            return out
+            return out, usage_dict
     except Exception:
         pass
 
@@ -338,7 +381,7 @@ def run_one(
     for (name, user_text) in fixtures:
         messages = build_messages(system_prompt=system_prompt, user_text=user_text)
         try:
-            output = call_openai(
+            output, usage = call_openai(
                 model=model,
                 messages=messages,
                 temperature=temperature,
@@ -347,6 +390,7 @@ def run_one(
             error: Optional[str] = None
         except Exception as e:
             output = ""
+            usage = {}
             error = f"{type(e).__name__}: {e}"
 
         flags = basic_heuristic_flags(mode, output)
@@ -361,6 +405,7 @@ def run_one(
             "error": error,
             "flags": flags,
             "chars": len(output),
+            "usage": usage,
         }
 
     return results
@@ -681,36 +726,130 @@ def main_argv(argv: Sequence[str]) -> int:
             "dryRun": True,
         }
 
-        # Load prompt (single-run only)
-        bundle, source_kind, source_id = load_prompts_bundle(
-            prompts_path=Path(args.prompts_path).resolve() if args.prompts_path else None,
-            prompts_url=args.prompts_url,
+        if not ab_enabled:
+            # Load prompt (single-run only)
+            bundle, source_kind, source_id = load_prompts_bundle(
+                prompts_path=Path(args.prompts_path).resolve() if args.prompts_path else None,
+                prompts_url=args.prompts_url,
+                default_prompts_path=default_prompts_path,
+            )
+            system_prompt = system_prompt_for_mode(bundle, args.mode)
+            if args.system_override_file:
+                system_prompt = _read_text_file(Path(args.system_override_file))
+
+            manifest.update(
+                {
+                    "promptsSourceKind": source_kind,
+                    "promptsSourceId": source_id,
+                    "systemPromptSha256": _sha256_text(system_prompt),
+                    "promptsUpdatedAt": bundle.updated_at,
+                    "promptsTtlSeconds": bundle.ttl_seconds,
+                }
+            )
+
+            # Write placeholder outputs.
+            results: Dict[str, Dict[str, Any]] = {}
+            for (name, _) in fixtures:
+                placeholder = f"[DRY_RUN] fixture={name} mode={args.mode}"
+                flags = basic_heuristic_flags(args.mode, placeholder)
+                write_output(out_root / "single", args.mode, name, placeholder)
+                results[name] = {
+                    "output": placeholder,
+                    "error": None,
+                    "flags": flags,
+                    "chars": len(placeholder),
+                    "usage": {},
+                }
+
+            write_text(out_root / "run.json", json.dumps(manifest, indent=2))
+            write_text(out_root / "summary.json", json.dumps(results, indent=2))
+            print(f"Out={out_root}")
+            print("Done")
+            return 0
+
+        # A/B dry run
+        baseline_bundle, baseline_kind, baseline_id = load_prompts_bundle(
+            prompts_path=Path(args.baseline_prompts_path).resolve() if args.baseline_prompts_path else None,
+            prompts_url=args.baseline_prompts_url,
             default_prompts_path=default_prompts_path,
         )
-        system_prompt = system_prompt_for_mode(bundle, args.mode)
+        candidate_bundle, candidate_kind, candidate_id = load_prompts_bundle(
+            prompts_path=Path(args.candidate_prompts_path).resolve() if args.candidate_prompts_path else None,
+            prompts_url=args.candidate_prompts_url,
+            default_prompts_path=default_prompts_path,
+        )
+
+        baseline_sp = system_prompt_for_mode(baseline_bundle, args.mode)
+        candidate_sp = system_prompt_for_mode(candidate_bundle, args.mode)
         if args.system_override_file:
-            system_prompt = _read_text_file(Path(args.system_override_file))
+            override = _read_text_file(Path(args.system_override_file))
+            baseline_sp = override
+            candidate_sp = override
 
         manifest.update(
             {
-                "promptsSourceKind": source_kind,
-                "promptsSourceId": source_id,
-                "systemPromptSha256": _sha256_text(system_prompt),
-                "promptsUpdatedAt": bundle.updated_at,
-                "promptsTtlSeconds": bundle.ttl_seconds,
+                "ab": {
+                    "baseline": {
+                        "promptsSourceKind": baseline_kind,
+                        "promptsSourceId": baseline_id,
+                        "promptsUpdatedAt": baseline_bundle.updated_at,
+                        "systemPromptSha256": _sha256_text(baseline_sp),
+                    },
+                    "candidate": {
+                        "promptsSourceKind": candidate_kind,
+                        "promptsSourceId": candidate_id,
+                        "promptsUpdatedAt": candidate_bundle.updated_at,
+                        "systemPromptSha256": _sha256_text(candidate_sp),
+                    },
+                }
             }
         )
 
-        # Write placeholder outputs.
-        results: Dict[str, Dict[str, Any]] = {}
+        baseline_results: Dict[str, Dict[str, Any]] = {}
+        candidate_results: Dict[str, Dict[str, Any]] = {}
+
         for (name, _) in fixtures:
-            placeholder = f"[DRY_RUN] fixture={name} mode={args.mode}"
-            flags = basic_heuristic_flags(args.mode, placeholder)
-            write_output(out_root / "single", args.mode, name, placeholder)
-            results[name] = {"output": placeholder, "error": None, "flags": flags, "chars": len(placeholder)}
+            btxt = f"[DRY_RUN] variant=baseline fixture={name} mode={args.mode}"
+            ctxt = f"[DRY_RUN] variant=candidate fixture={name} mode={args.mode}"
+
+            bflags = basic_heuristic_flags(args.mode, btxt)
+            cflags = basic_heuristic_flags(args.mode, ctxt)
+
+            write_output(out_root / "baseline", args.mode, name, btxt)
+            write_output(out_root / "candidate", args.mode, name, ctxt)
+
+            baseline_results[name] = {"output": btxt, "error": None, "flags": bflags, "chars": len(btxt), "usage": {}}
+            candidate_results[name] = {"output": ctxt, "error": None, "flags": cflags, "chars": len(ctxt), "usage": {}}
+
+        diffs_dir = out_root / "diffs" / args.mode
+        diffs_dir.mkdir(parents=True, exist_ok=True)
+
+        diff_index: Dict[str, Any] = {}
+        for name, _ in fixtures:
+            a = baseline_results[name]["output"] or ""
+            b = candidate_results[name]["output"] or ""
+            d = unified_diff(a, b, a_label=f"baseline/{name}", b_label=f"candidate/{name}")
+            write_text(diffs_dir / f"{name}.diff.txt", d if d.strip() else "[NO DIFF]\n")
+
+            diff_index[name] = {
+                "baseline": baseline_results[name],
+                "candidate": candidate_results[name],
+                "diffFile": str((diffs_dir / f"{name}.diff.txt").resolve()),
+            }
+
+        try:
+            report_path = write_ab_report_html(
+                out_root=out_root,
+                mode=args.mode,
+                fixtures=[n for (n, _) in fixtures],
+                diff_index=diff_index,
+            )
+            manifest["abReportHtml"] = str(report_path.resolve())
+        except Exception:
+            pass
 
         write_text(out_root / "run.json", json.dumps(manifest, indent=2))
-        write_text(out_root / "summary.json", json.dumps(results, indent=2))
+        write_text(out_root / "ab_summary.json", json.dumps(diff_index, indent=2))
         print(f"Out={out_root}")
         print("Done")
         return 0

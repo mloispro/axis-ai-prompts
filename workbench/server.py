@@ -389,17 +389,44 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
     fixture_input = {n: t for (n, t) in fixtures}
 
     items: List[Dict[str, Any]] = []
+    totals: Dict[str, int] = {
+        "baselineInputTokens": 0,
+        "baselineOutputTokens": 0,
+        "baselineTotalTokens": 0,
+        "baselineCachedTokens": 0,
+        "candidateInputTokens": 0,
+        "candidateOutputTokens": 0,
+        "candidateTotalTokens": 0,
+        "candidateCachedTokens": 0,
+    }
     for name in fixture_input.keys():
         di = diff_index.get(name) or {}
         b = (di.get("baseline") or {}).get("output") or ""
         c = (di.get("candidate") or {}).get("output") or ""
+        bu = (di.get("baseline") or {}).get("usage") or {}
+        cu = (di.get("candidate") or {}).get("usage") or {}
         df = di.get("diffFile") or ""
+
+        def _add(prefix: str, usage: Dict[str, Any]) -> None:
+            try:
+                totals[f"{prefix}InputTokens"] += int(usage.get("inputTokens") or 0)
+                totals[f"{prefix}OutputTokens"] += int(usage.get("outputTokens") or 0)
+                totals[f"{prefix}TotalTokens"] += int(usage.get("totalTokens") or 0)
+                totals[f"{prefix}CachedTokens"] += int(usage.get("cachedTokens") or 0)
+            except Exception:
+                # Keep totals best-effort.
+                pass
+
+        _add("baseline", bu)
+        _add("candidate", cu)
         items.append(
             {
                 "fixture": name,
                 "input": fixture_input.get(name, ""),
                 "baselineOutput": b,
                 "candidateOutput": c,
+                "baselineUsage": bu,
+                "candidateUsage": cu,
                 "diffFile": df,
             }
         )
@@ -408,6 +435,7 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
         {
             "outDir": str(out),
             "reportPath": f"/api/out/{out.name}/ab_report.html",
+            "totals": totals,
             "items": items,
         }
     )

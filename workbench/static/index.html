@@ -14,9 +14,13 @@
     .col { flex: 1; min-width: 220px; }
     button { padding: 10px 14px; border-radius: 10px; border: 1px solid #111; background: #111; color: white; cursor: pointer; }
     button.secondary { background: white; color: #111; }
+    button.ghost { background: #f5f5f5; color: #111; border-color: #ccc; }
     pre { white-space: pre-wrap; background: #0b0f14; color: #e6edf3; padding: 10px; border-radius: 10px; overflow: auto; }
     .muted { color: #555; font-size: 12px; }
     .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .err { color: #b91c1c; font-size: 12px; }
+    .ok { color: #166534; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -66,8 +70,82 @@
         <input id="remoteUrl" type="text" />
       </div>
       <div>
-        <label>Candidate JSON</label>
-        <textarea id="candidateJson"></textarea>
+        <label>Editor</label>
+        <div class="muted">Edit the prompt text fields directly. Use Advanced JSON only if needed.</div>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="grid3">
+      <div>
+        <label>updatedAt (UTC ISO)</label>
+        <input id="updatedAtInput" type="text" />
+        <div class="muted">Auto-updated when you run A/B.</div>
+      </div>
+      <div>
+        <label>ttlSeconds</label>
+        <input id="ttlSecondsInput" type="number" min="1" max="31536000" value="3600" />
+      </div>
+      <div>
+        <label>version</label>
+        <input id="versionInput" type="number" min="1" max="999" value="1" />
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="grid3">
+      <div>
+        <label>openerSystem</label>
+        <textarea id="openerSystem"></textarea>
+      </div>
+      <div>
+        <label>appChatSystem</label>
+        <textarea id="appChatSystem"></textarea>
+      </div>
+      <div>
+        <label>regChatSystem</label>
+        <textarea id="regChatSystem"></textarea>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <details class="card" style="padding:12px; border-color:#eee;">
+      <summary style="cursor:pointer;">Advanced JSON (optional)</summary>
+      <div style="height:10px"></div>
+      <div class="row">
+        <button class="ghost" id="formatJsonBtn" type="button">Format JSON</button>
+        <button class="ghost" id="validateJsonBtn" type="button">Validate JSON</button>
+        <span id="jsonStatus" class="muted"></span>
+      </div>
+      <div style="height:10px"></div>
+      <label>Candidate JSON</label>
+      <textarea id="candidateJson"></textarea>
+      <div id="jsonError" class="err"></div>
+    </details>
+
+    <div style="height:12px"></div>
+
+    <div class="grid2">
+      <div>
+        <label>Cost (optional)</label>
+        <div class="row">
+          <div class="col">
+            <label>Input $ / 1M tokens</label>
+            <input id="priceIn" type="number" min="0" step="0.01" placeholder="e.g. 0.15" />
+          </div>
+          <div class="col">
+            <label>Output $ / 1M tokens</label>
+            <input id="priceOut" type="number" min="0" step="0.01" placeholder="e.g. 0.60" />
+          </div>
+        </div>
+        <div class="muted">Pricing varies by model/account; enter values if you want cost estimates.</div>
+      </div>
+      <div>
+        <label>Tokens</label>
+        <div class="muted">After a run, totals (incl. cached tokens) appear in Results.</div>
       </div>
     </div>
 
@@ -88,6 +166,8 @@
   </div>
 
 <script>
+let currentCandidate = null;
+
 async function api(path, opts) {
   const res = await fetch(path, opts);
   if (!res.ok) {
@@ -99,6 +179,138 @@ async function api(path, opts) {
 
 function esc(s) {
   return (s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+}
+
+function nowUtcIso() {
+  return new Date().toISOString();
+}
+
+function parseCandidateJson(text) {
+  try {
+    const obj = JSON.parse(text);
+    return { ok: true, obj };
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+}
+
+function candidateFromFields() {
+  const version = parseInt(document.getElementById('versionInput').value, 10) || 1;
+  const ttlSeconds = parseInt(document.getElementById('ttlSecondsInput').value, 10) || 3600;
+  const updatedAt = (document.getElementById('updatedAtInput').value || '').trim() || nowUtcIso();
+
+  return {
+    version,
+    updatedAt,
+    ttlSeconds,
+    prompts: {
+      openerSystem: document.getElementById('openerSystem').value || '',
+      appChatSystem: document.getElementById('appChatSystem').value || '',
+      regChatSystem: document.getElementById('regChatSystem').value || '',
+    }
+  };
+}
+
+function syncFieldsFromCandidate(cand) {
+  currentCandidate = cand;
+
+  document.getElementById('versionInput').value = String(cand?.version ?? 1);
+  document.getElementById('ttlSecondsInput').value = String(cand?.ttlSeconds ?? 3600);
+  document.getElementById('updatedAtInput').value = String(cand?.updatedAt ?? '');
+
+  const p = cand?.prompts || {};
+  document.getElementById('openerSystem').value = p.openerSystem || '';
+  document.getElementById('appChatSystem').value = p.appChatSystem || '';
+  document.getElementById('regChatSystem').value = p.regChatSystem || '';
+
+  document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
+  document.getElementById('jsonError').textContent = '';
+  document.getElementById('jsonStatus').textContent = '';
+}
+
+function syncJsonFromFields() {
+  const cand = candidateFromFields();
+  document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
+  document.getElementById('jsonError').textContent = '';
+  document.getElementById('jsonStatus').textContent = 'Synced from editor fields.';
+  currentCandidate = cand;
+  return cand;
+}
+
+function syncFieldsFromJson() {
+  const text = document.getElementById('candidateJson').value;
+  const parsed = parseCandidateJson(text);
+  if (!parsed.ok) {
+    document.getElementById('jsonError').textContent = parsed.error;
+    document.getElementById('jsonStatus').textContent = 'Invalid JSON.';
+    return null;
+  }
+  document.getElementById('jsonError').textContent = '';
+  document.getElementById('jsonStatus').textContent = 'Loaded JSON into fields.';
+  syncFieldsFromCandidate(parsed.obj);
+  return parsed.obj;
+}
+
+function formatJson() {
+  const text = document.getElementById('candidateJson').value;
+  const parsed = parseCandidateJson(text);
+  if (!parsed.ok) {
+    document.getElementById('jsonError').textContent = parsed.error;
+    document.getElementById('jsonStatus').textContent = 'Invalid JSON.';
+    return;
+  }
+  document.getElementById('candidateJson').value = JSON.stringify(parsed.obj, null, 2);
+  document.getElementById('jsonError').textContent = '';
+  document.getElementById('jsonStatus').textContent = 'Formatted.';
+}
+
+function validateJson() {
+  const text = document.getElementById('candidateJson').value;
+  const parsed = parseCandidateJson(text);
+  if (!parsed.ok) {
+    document.getElementById('jsonError').textContent = parsed.error;
+    document.getElementById('jsonStatus').textContent = 'Invalid JSON.';
+    return false;
+  }
+
+  const obj = parsed.obj;
+  const errs = [];
+  if (typeof obj?.version !== 'number') errs.push('version must be a number');
+  if (typeof obj?.updatedAt !== 'string' || !obj.updatedAt.trim()) errs.push('updatedAt must be a non-empty string');
+  if (typeof obj?.ttlSeconds !== 'number') errs.push('ttlSeconds must be a number');
+  if (typeof obj?.prompts !== 'object') errs.push('prompts must be an object');
+
+  if (errs.length) {
+    document.getElementById('jsonError').textContent = errs.join(' | ');
+    document.getElementById('jsonStatus').textContent = 'Invalid schema.';
+    return false;
+  }
+
+  document.getElementById('jsonError').textContent = '';
+  document.getElementById('jsonStatus').textContent = 'OK.';
+  return true;
+}
+
+function readPricing() {
+  const pin = parseFloat(document.getElementById('priceIn').value);
+  const pout = parseFloat(document.getElementById('priceOut').value);
+  return {
+    inPer1M: Number.isFinite(pin) ? pin : null,
+    outPer1M: Number.isFinite(pout) ? pout : null,
+  };
+}
+
+function formatCost(usd) {
+  if (usd === null || usd === undefined || !Number.isFinite(usd)) return '';
+  return '$' + usd.toFixed(6);
+}
+
+function computeCost(totals, pricing) {
+  if (!pricing?.inPer1M || !pricing?.outPer1M) return null;
+  const inTok = (totals?.candidateInputTokens || 0) + (totals?.baselineInputTokens || 0);
+  const outTok = (totals?.candidateOutputTokens || 0) + (totals?.baselineOutputTokens || 0);
+  const usd = (inTok / 1_000_000.0) * pricing.inPer1M + (outTok / 1_000_000.0) * pricing.outPer1M;
+  return usd;
 }
 
 async function loadApps() {
@@ -135,7 +347,7 @@ async function onAppChanged() {
   document.getElementById('baselineSource').value = 'remote_url';
 
   const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
-  document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
+  syncFieldsFromCandidate(cand);
 }
 
 async function runAb() {
@@ -149,8 +361,11 @@ async function runAb() {
   const baselineSource = document.getElementById('baselineSource').value;
   const remoteUrl = document.getElementById('remoteUrl').value.trim();
 
+  // Ensure updatedAt is set and sync JSON from field editor.
+  document.getElementById('updatedAtInput').value = nowUtcIso();
+  const candidateObj = syncJsonFromFields();
+  const candidateJson = JSON.stringify(candidateObj);
   // Save candidate file first.
-  const candidateJson = document.getElementById('candidateJson').value;
   await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: candidateJson });
 
   const payload = { appId, mode, model, maxFixtures, baselineSource, remoteUrl };
@@ -162,12 +377,25 @@ async function runAb() {
 
 function renderResults(run) {
   const root = document.getElementById('results');
-  const meta = `<div class="muted">Out: ${esc(run.outDir)} | Report: <a href="${esc(run.reportPath)}" target="_blank">ab_report.html</a></div>`;
+  const t = run.totals || {};
+  const pricing = readPricing();
+  const cost = computeCost(t, pricing);
+
+  const tokensLine = `Tokens — baseline in/out/total/cached: ${esc(String(t.baselineInputTokens ?? 0))} / ${esc(String(t.baselineOutputTokens ?? 0))} / ${esc(String(t.baselineTotalTokens ?? 0))} / ${esc(String(t.baselineCachedTokens ?? 0))}`
+    + `<br/>Tokens — candidate in/out/total/cached: ${esc(String(t.candidateInputTokens ?? 0))} / ${esc(String(t.candidateOutputTokens ?? 0))} / ${esc(String(t.candidateTotalTokens ?? 0))} / ${esc(String(t.candidateCachedTokens ?? 0))}`;
+
+  const costLine = cost !== null ? (`<br/>Est. cost (both runs): ${esc(formatCost(cost))}`) : '';
+
+  const meta = `<div class="muted">Out: ${esc(run.outDir)} | Report: <a href="${esc(run.reportPath)}" target="_blank">ab_report.html</a><br/>${tokensLine}${costLine}</div>`;
 
   let html = meta;
   for (const r of run.items) {
+    const bu = r.baselineUsage || {};
+    const cu = r.candidateUsage || {};
     html += `<hr><h3>${esc(r.fixture)}</h3>`;
     html += `<div class="muted">Diff: ${esc(r.diffFile || '')}</div>`;
+    html += `<div class="muted">Usage (baseline) in/out/total/cached: ${esc(String(bu.inputTokens ?? ''))} / ${esc(String(bu.outputTokens ?? ''))} / ${esc(String(bu.totalTokens ?? ''))} / ${esc(String(bu.cachedTokens ?? ''))}</div>`;
+    html += `<div class="muted">Usage (candidate) in/out/total/cached: ${esc(String(cu.inputTokens ?? ''))} / ${esc(String(cu.outputTokens ?? ''))} / ${esc(String(cu.totalTokens ?? ''))} / ${esc(String(cu.cachedTokens ?? ''))}</div>`;
     html += `<div><strong>INPUT</strong><pre>${esc(r.input)}</pre></div>`;
     html += `<div class="grid2">`;
     html += `<div><strong>BASELINE</strong><pre>${esc(r.baselineOutput)}</pre></div>`;
@@ -181,6 +409,19 @@ function renderResults(run) {
 async function openLastReport() {
   await api('/api/open-last', { method: 'POST' });
 }
+
+document.getElementById('formatJsonBtn').addEventListener('click', () => {
+  formatJson();
+});
+
+document.getElementById('validateJsonBtn').addEventListener('click', () => {
+  validateJson();
+});
+
+// Keep Advanced JSON and field editor in sync (best-effort).
+document.getElementById('candidateJson').addEventListener('blur', () => {
+  syncFieldsFromJson();
+});
 
 document.getElementById('runBtn').addEventListener('click', () => runAb().catch(e => {
   document.getElementById('status').textContent = 'Error: ' + e.message;

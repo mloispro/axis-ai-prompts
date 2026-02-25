@@ -369,6 +369,9 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
         rc = engine.main_argv(argv)
         if rc != 0:
             raise RuntimeError(f"Engine exit code {rc}")
+    except SystemExit as e:
+        # argparse calls SystemExit on parse errors
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 

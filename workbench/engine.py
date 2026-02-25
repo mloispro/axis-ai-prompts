@@ -549,6 +549,13 @@ def main_argv(argv: Sequence[str]) -> int:
     parser.add_argument("--max-output-tokens", type=int, default=200)
     parser.add_argument("--max-fixtures", type=int, default=0, help="0 = all")
 
+    parser.add_argument(
+        "--out-dir",
+        type=str,
+        default="",
+        help="Override output directory (defaults to workbench/out)",
+    )
+
     parser.add_argument("--fixtures-dir", type=str, default="", help="Override fixtures dir (defaults to ./fixtures)")
 
     # Single-run prompt source
@@ -623,6 +630,8 @@ def main_argv(argv: Sequence[str]) -> int:
     # Convenience map for printing inputs later
     fixture_input_by_name = {name: text for (name, text) in fixtures}
 
+    out_base = Path(args.out_dir).resolve() if args.out_dir else (Path(__file__).resolve().parent / "out")
+
     if args.validate_only:
         # Validate prompt loading (single-run only) + fixtures presence.
         bundle, source_kind, source_id = load_prompts_bundle(
@@ -641,7 +650,7 @@ def main_argv(argv: Sequence[str]) -> int:
 
     if args.dry_run:
         # Dry run: ensure we can load prompts/fixtures and write artifacts without network.
-        out_root = Path(__file__).resolve().parent / "out" / _utc_timestamp_slug()
+        out_root = out_base / _utc_timestamp_slug()
         out_root.mkdir(parents=True, exist_ok=True)
 
         git_sha = _try_git_head_sha(repo_root)
@@ -694,7 +703,7 @@ def main_argv(argv: Sequence[str]) -> int:
     # Real run requires key
     ensure_api_key()
 
-    out_root = Path(__file__).resolve().parent / "out" / _utc_timestamp_slug()
+    out_root = out_base / _utc_timestamp_slug()
     out_root.mkdir(parents=True, exist_ok=True)
 
     git_sha = _try_git_head_sha(repo_root)

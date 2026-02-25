@@ -29,14 +29,12 @@ Other apps can use prompts.template.json and this tool can be extended.
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import datetime as _dt
 import difflib
 import hashlib
 import json
 import os
 import pathlib
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -63,15 +61,6 @@ OUT_DIR = REPO_ROOT / "out"
 
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
-
-
-@dataclasses.dataclass(frozen=True)
-class RunConfig:
-    app: str
-    mode: str
-    model: str
-    temperature: float
-    max_tokens: int
 
 
 def _utc_run_id() -> str:
@@ -438,10 +427,14 @@ def cmd_selftest(args: argparse.Namespace) -> int:
     # Run a dry-run opener pass and verify outputs exist.
     test_args = argparse.Namespace(
         app="rizzchatai",
+        prompts_file=None,
+        label="selftest",
         mode="opener",
         model=DEFAULT_MODEL,
         temperature=0.3,
         max_tokens=24,
+        fixture=None,
+        continue_on_error=False,
         dry_run=True,
     )
     run_dir = cmd_run(test_args)
@@ -514,3 +507,18 @@ def cmd_list(args: argparse.Namespace) -> int:
             for t in txts:
                 print(f"    - {t.name}")
     return 0
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    func = getattr(args, "func", None)
+    if func is None:
+        parser.print_help()
+        return 2
+    return int(func(args))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

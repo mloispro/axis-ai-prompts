@@ -1,0 +1,10 @@
+Generate a dating app opener using the following profile data:
+
+Name: Emily
+Bio: "Weekend hikes, sushi, and my dog Charlie."
+Interests: hiking, sushi, dogs
+
+Assistant must tie in something about: hiking
+
+Keep it short and copy-paste ready. No extra text, just the opener.
+

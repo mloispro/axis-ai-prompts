@@ -1,0 +1,17 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Workbench Web (run site)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./tools/workbench-web/dev.ps1\" -Port 8787"
+    },
+    {
+      "name": "Workbench Web (server only)",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./tools/workbench-web/dev.ps1\" -Port 8787 -NoOpen"
+    }
+  ]
+}

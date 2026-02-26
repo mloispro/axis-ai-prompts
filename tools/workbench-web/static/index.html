@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Prompt Workbench Web</title>
+  <style>
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: system-ui, Segoe UI, Arial, sans-serif;
+      max-width: 1100px;
+      margin: 24px auto;
+      padding: 0 12px;
+    }
+
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: flex-end;
+    }
+
+    label {
+      display: block;
+      font-size: 12px;
+      color: #444;
+      margin-bottom: 4px;
+    }
+
+    select,
+    input[type="number"],
+    input[type="text"],
+    textarea {
+      width: 100%;
+      padding: 8px;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+    }
+
+    textarea {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      min-height: 140px;
+    }
+
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .col {
+      flex: 1;
+      min-width: 220px;
+    }
+
+    button {
+      padding: 10px 14px;
+      border-radius: 10px;
+      border: 1px solid #111;
+      background: #111;
+      color: white;
+      cursor: pointer;
+    }
+
+    button.secondary {
+      background: white;
+      color: #111;
+    }
+
+    button.ghost {
+      background: #f5f5f5;
+      color: #111;
+      border-color: #ccc;
+    }
+
+    pre {
+      white-space: pre-wrap;
+      background: #0b0f14;
+      color: #e6edf3;
+      padding: 10px;
+      border-radius: 10px;
+      overflow: auto;
+    }
+
+    .muted {
+      color: #555;
+      font-size: 12px;
+    }
+
+    .grid2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .grid3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 12px;
+    }
+
+    @media (max-width: 980px) {
+      .grid3 {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 720px) {
+      .grid2 {
+        grid-template-columns: 1fr;
+      }
+
+      body {
+        margin: 12px auto;
+      }
+
+      .col {
+        min-width: 180px;
+      }
+    }
+
+    .err {
+      color: #b91c1c;
+      font-size: 12px;
+    }
+
+    .ok {
+      color: #166534;
+      font-size: 12px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Prompt Workbench Web (local)</h1>
+  <p class="muted">Local-only UI for iterating on prompts in this repo. API key is read from OPENAI_API_KEY
+    (recommended: tools/workbench-web/.env.local).</p>
+
+  <div class="card">
+    <div class="row">
+      <div class="col">
+        <label>App</label>
+        <select id="appSelect"></select>
+      </div>
+      <div class="col">
+        <label>Mode</label>
+        <select id="modeSelect"></select>
+      </div>
+      <div class="col">
+        <label>Model</label>
+        <select id="modelSelect"></select>
+        <div class="muted">Costs show input / cached input / output ($ / 1M tokens).</div>
+      </div>
+      <div class="col">
+        <label>Dry run</label>
+        <div class="row" style="align-items:center; gap:8px;">
+          <input id="dryRun" type="checkbox" />
+          <div class="muted">No API calls</div>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="grid2">
+      <div>
+        <label>System prompt (saved locally per app)</label>
+        <div class="muted">Edits are saved to tools/workbench-web/state/candidates/&lt;appId&gt;.json (gitignored).
+        </div>
+      </div>
+      <div>
+        <label>User prompt</label>
+        <div class="muted">Run the system + user prompt against the API and see output, tokens, and cost.</div>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <div class="grid2">
+      <div>
+        <label>System prompt (for selected mode)</label>
+        <textarea id="systemPrompt" placeholder="System prompt"></textarea>
+      </div>
+      <div>
+        <label>User prompt</label>
+        <textarea id="userPrompt" placeholder="Write a user message here..."></textarea>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
+    <details class="card" style="padding:12px; border-color:#eee;">
+      <summary style="cursor:pointer;">Advanced (bundle JSON)</summary>
+      <div style="height:10px"></div>
+      <div class="grid3">
+        <div>
+          <label>updatedAt (UTC ISO)</label>
+          <input id="updatedAtInput" type="text" />
+          <div class="muted">Auto-updated when you run.</div>
+        </div>
+        <div>
+          <label>ttlSeconds</label>
+          <input id="ttlSecondsInput" type="number" min="1" max="31536000" value="3600" />
+        </div>
+        <div>
+          <label>version</label>
+          <input id="versionInput" type="number" min="1" max="999" value="1" />
+        </div>
+      </div>
+      <div style="height:10px"></div>
+      <div class="row">
+        <button class="ghost" id="formatJsonBtn" type="button">Format JSON</button>
+        <button class="ghost" id="validateJsonBtn" type="button">Validate JSON</button>
+        <span id="jsonStatus" class="muted"></span>
+      </div>
+      <div style="height:10px"></div>
+      <label>Candidate JSON</label>
+      <textarea id="candidateJson"></textarea>
+      <div id="jsonError" class="err"></div>
+    </details>
+
+    <div style="height:12px"></div>
+
+    <div class="row">
+      <button id="runTuneBtn">Run</button>
+      <span id="status" class="muted"></span>
+    </div>
+  </div>
+
+  <div style="height:14px"></div>
+
+  <div class="card">
+    <h2>Results</h2>
+    <div id="results"></div>
+  </div>
+
+  <script>
+    let currentCandidate = null;
+    let models = [];
+
+    const MODE_TO_PROMPT_KEY = {
+      opener: 'openerSystem',
+      app_chat: 'appChatSystem',
+      reg_chat: 'regChatSystem',
+    };
+
+    async function api(path, opts) {
+      const res = await fetch(path, opts);
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || ('HTTP ' + res.status));
+      }
+      return res;
+    }
+
+    function esc(s) {
+      return (s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+    }
+
+    function nowUtcIso() {
+      return new Date().toISOString();
+    }
+
+    function parseCandidateJson(text) {
+      try {
+        const obj = JSON.parse(text);
+        return { ok: true, obj };
+      } catch (e) {
+        return { ok: false, error: e?.message || String(e) };
+      }
+    }
+
+    function candidateFromFields() {
+      const base = currentCandidate && typeof currentCandidate === 'object' ? currentCandidate : {};
+      const prompts = { ...(base.prompts || {}) };
+
+      const mode = document.getElementById('modeSelect').value;
+      const key = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
+      prompts[key] = document.getElementById('systemPrompt').value || '';
+
+      const version = parseInt(document.getElementById('versionInput').value, 10) || (base.version ?? 1) || 1;
+      const ttlSeconds = parseInt(document.getElementById('ttlSecondsInput').value, 10) || (base.ttlSeconds ?? 3600) || 3600;
+      const updatedAt = (document.getElementById('updatedAtInput').value || '').trim() || (base.updatedAt ?? '') || nowUtcIso();
+
+      return {
+        version,
+        updatedAt,
+        ttlSeconds,
+        prompts,
+      };
+    }
+
+    function syncFieldsFromCandidate(cand) {
+      currentCandidate = cand;
+
+      document.getElementById('versionInput').value = String(cand?.version ?? 1);
+      document.getElementById('ttlSecondsInput').value = String(cand?.ttlSeconds ?? 3600);
+      document.getElementById('updatedAtInput').value = String(cand?.updatedAt ?? '');
+
+      const p = cand?.prompts || {};
+      const mode = document.getElementById('modeSelect').value;
+      const key = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
+      document.getElementById('systemPrompt').value = p[key] || '';
+
+      document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
+      document.getElementById('jsonError').textContent = '';
+      document.getElementById('jsonStatus').textContent = '';
+    }
+
+    function syncJsonFromFields() {
+      const cand = candidateFromFields();
+      document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
+      document.getElementById('jsonError').textContent = '';
+      document.getElementById('jsonStatus').textContent = 'Synced from editor fields.';
+      currentCandidate = cand;
+      return cand;
+    }
+
+    function syncFieldsFromJson() {
+      const text = document.getElementById('candidateJson').value;
+      const parsed = parseCandidateJson(text);
+      if (!parsed.ok) {
+        document.getElementById('jsonError').textContent = parsed.error;
+        document.getElementById('jsonStatus').textContent = 'Invalid JSON.';
+        return null;
+      }
+      document.getElementById('jsonError').textContent = '';
+      document.getElementById('jsonStatus').textContent = 'Loaded JSON into fields.';
+      syncFieldsFromCandidate(parsed.obj);
+      return parsed.obj;
+    }
+
+    function formatJson() {
+      const text = document.getElementById('candidateJson').value;
+      const parsed = parseCandidateJson(text);
+      if (!parsed.ok) {
+        document.getElementById('jsonError').textContent = parsed.error;
+        document.getElementById('jsonStatus').textContent = 'Invalid JSON.';
+        return;
+      }
+      document.getElementById('candidateJson').value = JSON.stringify(parsed.obj, null, 2);
+      document.getElementById('jsonError').textContent = '';
+      document.getElementById('jsonStatus').textContent = 'Formatted.';
+    }
+
+    function validateJson() {
+      const text = document.getElementById('candidateJson').value;
+      const parsed = parseCandidateJson(text);
+      if (!parsed.ok) {
+        document.getElementById('jsonError').textContent = parsed.error;
+        document.getElementById('jsonStatus').textContent = 'Invalid JSON.';
+        return false;
+      }
+
+      const obj = parsed.obj;
+      const errs = [];
+      if (typeof obj?.version !== 'number') errs.push('version must be a number');
+      if (typeof obj?.updatedAt !== 'string' || !obj.updatedAt.trim()) errs.push('updatedAt must be a non-empty string');
+      if (typeof obj?.ttlSeconds !== 'number') errs.push('ttlSeconds must be a number');
+      if (typeof obj?.prompts !== 'object') errs.push('prompts must be an object');
+
+      if (errs.length) {
+        document.getElementById('jsonError').textContent = errs.join(' | ');
+        document.getElementById('jsonStatus').textContent = 'Invalid schema.';
+        return false;
+      }
+
+      document.getElementById('jsonError').textContent = '';
+      document.getElementById('jsonStatus').textContent = 'OK.';
+      return true;
+    }
+
+    function money(n) {
+      if (n === null || n === undefined || !Number.isFinite(n)) return '';
+      return '$' + n.toFixed(6);
+    }
+
+    function fmtRate(n) {
+      if (n === null || n === undefined || !Number.isFinite(n)) return '';
+      return '$' + n.toFixed(3);
+    }
+
+    function modelLabel(m) {
+      const tag = m.isLatest ? ' (latest)' : '';
+      return `${m.model}${tag} — in ${fmtRate(m.inputPer1M)} / cached ${fmtRate(m.cachedInputPer1M)} / out ${fmtRate(m.outputPer1M)}`;
+    }
+
+    async function loadModels() {
+      const res = await (await api('/api/models')).json();
+      models = res.models || [];
+
+      const modelSelect = document.getElementById('modelSelect');
+      modelSelect.innerHTML = '';
+      for (const m of models) {
+        const opt = document.createElement('option');
+        opt.value = m.model;
+        opt.textContent = modelLabel(m);
+        modelSelect.appendChild(opt);
+      }
+    }
+
+    async function loadApps() {
+      await loadModels();
+      const apps = await (await api('/api/apps')).json();
+      const appSelect = document.getElementById('appSelect');
+      appSelect.innerHTML = '';
+      for (const a of apps) {
+        const opt = document.createElement('option');
+        opt.value = a.appId;
+        opt.textContent = a.displayName;
+        appSelect.appendChild(opt);
+      }
+      appSelect.addEventListener('change', () => onAppChanged());
+      await onAppChanged();
+    }
+
+    async function onAppChanged() {
+      const appId = document.getElementById('appSelect').value;
+      const cfg = await (await api('/api/apps/' + encodeURIComponent(appId))).json();
+
+      const modeSelect = document.getElementById('modeSelect');
+      modeSelect.innerHTML = '';
+      for (const m of cfg.modes) {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        modeSelect.appendChild(opt);
+      }
+
+      modeSelect.addEventListener('change', () => {
+        if (currentCandidate) syncFieldsFromCandidate(currentCandidate);
+      });
+
+      const modelSelect = document.getElementById('modelSelect');
+      const desired = (cfg.defaultModel || 'gpt-4o-mini').trim();
+      const has = [...modelSelect.options].some(o => o.value === desired);
+      modelSelect.value = has ? desired : (modelSelect.options[0]?.value || desired);
+
+      const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
+      syncFieldsFromCandidate(cand);
+    }
+
+    async function runTune() {
+      const status = document.getElementById('status');
+      status.textContent = 'Running…';
+
+      const appId = document.getElementById('appSelect').value;
+      const mode = document.getElementById('modeSelect').value;
+      const model = document.getElementById('modelSelect').value;
+      const dryRun = !!document.getElementById('dryRun').checked;
+      const systemPrompt = document.getElementById('systemPrompt').value || '';
+      const userPrompt = document.getElementById('userPrompt').value || '';
+
+      // Ensure updatedAt is set and sync JSON from field editor.
+      document.getElementById('updatedAtInput').value = nowUtcIso();
+      const candidateObj = syncJsonFromFields();
+      const candidateJson = JSON.stringify(candidateObj);
+      await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: candidateJson });
+
+      const payload = { appId, mode, model, systemPrompt, userPrompt, dryRun };
+      const run = await (await api('/api/run/tune', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })).json();
+
+      status.textContent = 'Done';
+      renderResults(run);
+    }
+
+    function renderResults(run) {
+      const root = document.getElementById('results');
+      const u = run.usage || {};
+      const p = run.pricing || {};
+      const c = run.cost || {};
+
+      const tokensLine = `Tokens — in/out/total/cached: ${esc(String(u.inputTokens ?? 0))} / ${esc(String(u.outputTokens ?? 0))} / ${esc(String(u.totalTokens ?? 0))} / ${esc(String(u.cachedTokens ?? 0))}`;
+      const pricingLine = `Pricing ($/1M) — in ${esc(String(p.inputPer1M ?? ''))} / cached ${esc(String(p.cachedInputPer1M ?? ''))} / out ${esc(String(p.outputPer1M ?? ''))}`;
+      const costLine = `Cost — input ${esc(money(c.inputUsd))} | cached ${esc(money(c.cachedInputUsd))} | output ${esc(money(c.outputUsd))} | total ${esc(money(c.totalUsd))}`;
+
+      root.innerHTML = `
+        <div class="muted">Model: ${esc(run.model || '')}<br/>${tokensLine}<br/>${pricingLine}<br/>${costLine}</div>
+        <div style="height:10px"></div>
+        <div><strong>OUTPUT</strong><pre>${esc(run.outputText || '')}</pre></div>
+      `;
+    }
+
+    document.getElementById('formatJsonBtn').addEventListener('click', () => {
+      formatJson();
+    });
+
+    document.getElementById('validateJsonBtn').addEventListener('click', () => {
+      validateJson();
+    });
+
+    // Keep Advanced JSON and field editor in sync (best-effort).
+    document.getElementById('candidateJson').addEventListener('blur', () => {
+      syncFieldsFromJson();
+    });
+
+    document.getElementById('runTuneBtn').addEventListener('click', () => runTune().catch(e => {
+      document.getElementById('status').textContent = 'Error: ' + e.message;
+    }));
+
+    loadApps().catch(e => {
+      document.getElementById('status').textContent = 'Error: ' + e.message;
+    });
+  </script>
+</body>
+
+</html>

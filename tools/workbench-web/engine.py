@@ -1,3 +1,8 @@
+# pylint: skip-file
+# flake8: noqa
+# ruff: noqa
+# pyright: ignore
+
 """Prompt workbench for iterating on prompt text without rebuilding the Android app.
 
 Key goals:
@@ -59,8 +64,16 @@ class PromptBundle:
 
 
 def _repo_root() -> Path:
-    # workbench/engine.py -> repo root is the parent of workbench/
-    return Path(__file__).resolve().parents[1]
+    cur = Path(__file__).resolve()
+    if cur.is_file():
+        cur = cur.parent
+    for _ in range(10):
+        if (cur / "prompts").is_dir() and (cur / "fixtures").is_dir():
+            return cur
+        cur = cur.parent
+    raise RuntimeError(
+        "Could not locate repo root (expected folders 'prompts/' and 'fixtures/')."
+    )
 
 
 def _utc_now_iso() -> str:
@@ -88,7 +101,9 @@ def _read_text_file(path: Path) -> str:
 
 
 def _fetch_url_bytes(url: str, timeout_s: int = 15) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": "RizzChatAI-PromptWorkbench/1.0"})
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "RizzChatAI-PromptWorkbench/1.0"}
+    )
     try:
         with urllib.request.urlopen(req, timeout=timeout_s) as resp:
             return resp.read()
@@ -105,7 +120,9 @@ def _fetch_url_bytes(url: str, timeout_s: int = 15) -> bytes:
         msg = f"Failed to fetch URL {url} (HTTP {getattr(e, 'code', '?')}): {body_text or getattr(e, 'reason', '')}"
         raise RuntimeError(msg) from e
     except urllib.error.URLError as e:
-        raise RuntimeError(f"Failed to fetch URL {url}: {getattr(e, 'reason', e)}") from e
+        raise RuntimeError(
+            f"Failed to fetch URL {url}: {getattr(e, 'reason', e)}"
+        ) from e
 
 
 def _try_git_head_sha(cwd: Path) -> Optional[str]:
@@ -170,11 +187,19 @@ def load_prompts_bundle(
 
     if prompts_url:
         data = _fetch_url_bytes(prompts_url)
-        return load_prompts_json_from_bytes(data, source=prompts_url), "URL", prompts_url
+        return (
+            load_prompts_json_from_bytes(data, source=prompts_url),
+            "URL",
+            prompts_url,
+        )
 
     path = prompts_path or default_prompts_path
     data = path.read_bytes()
-    return load_prompts_json_from_bytes(data, source=str(path)), "PATH", str(path.resolve())
+    return (
+        load_prompts_json_from_bytes(data, source=str(path)),
+        "PATH",
+        str(path.resolve()),
+    )
 
 
 def system_prompt_for_mode(bundle: PromptBundle, mode: str) -> str:
@@ -185,7 +210,9 @@ def system_prompt_for_mode(bundle: PromptBundle, mode: str) -> str:
     }[mode]
 
 
-def load_fixtures(fixtures_dir: Path, mode: str, app_id: str = "") -> List[Tuple[str, str]]:
+def load_fixtures(
+    fixtures_dir: Path, mode: str, app_id: str = ""
+) -> List[Tuple[str, str]]:
     """Load fixtures for a mode.
 
     Preferred layout:
@@ -227,7 +254,7 @@ def ensure_api_key() -> None:
     key = os.getenv("OPENAI_API_KEY")
     if not key or not key.strip():
         raise RuntimeError(
-            "OPENAI_API_KEY is not set. Create workbench/.env.local (gitignored) with OPENAI_API_KEY=..."
+            "OPENAI_API_KEY is not set. Create tools/workbench-web/.env.local (gitignored) with OPENAI_API_KEY=..."
         )
     # Never print the key. Basic sanity: avoid strings that look like a placeholder.
     if "<" in key or ">" in key:
@@ -283,7 +310,12 @@ def _usage_to_dict(usage: Any) -> Dict[str, Any]:
     return out
 
 
-def call_openai(model: str, messages: List[Dict[str, Any]], temperature: float, max_output_tokens: int) -> Tuple[str, Dict[str, Any]]:
+def call_openai(
+    model: str,
+    messages: List[Dict[str, Any]],
+    temperature: float,
+    max_output_tokens: int,
+) -> Tuple[str, Dict[str, Any]]:
     from openai import OpenAI
 
     client = OpenAI()
@@ -362,7 +394,9 @@ def write_output(out_dir: Path, mode: str, fixture_name: str, content: str) -> P
 def unified_diff(a: str, b: str, a_label: str, b_label: str) -> str:
     a_lines = a.splitlines(keepends=True)
     b_lines = b.splitlines(keepends=True)
-    return "".join(difflib.unified_diff(a_lines, b_lines, fromfile=a_label, tofile=b_label))
+    return "".join(
+        difflib.unified_diff(a_lines, b_lines, fromfile=a_label, tofile=b_label)
+    )
 
 
 def run_one(
@@ -378,7 +412,7 @@ def run_one(
 ) -> Dict[str, Dict[str, Any]]:
     results: Dict[str, Dict[str, Any]] = {}
 
-    for (name, user_text) in fixtures:
+    for name, user_text in fixtures:
         messages = build_messages(system_prompt=system_prompt, user_text=user_text)
         try:
             output, usage = call_openai(
@@ -444,7 +478,9 @@ def write_ab_report_html(
     parts.append(f"<p class='meta'>Out: {_html_escape(str(out_root))}</p>")
     parts.append("<ol>")
     for name in fixtures:
-        parts.append(f"<li><a href='#f-{_html_escape(name)}'>{_html_escape(name)}</a></li>")
+        parts.append(
+            f"<li><a href='#f-{_html_escape(name)}'>{_html_escape(name)}</a></li>"
+        )
     parts.append("</ol>")
 
     for name in fixtures:
@@ -453,8 +489,12 @@ def write_ab_report_html(
         cand = item.get("candidate") or {}
         diff_file = item.get("diffFile") or ""
 
-        btxt = base.get("output") or ("[ERROR] " + base.get("error") if base.get("error") else "")
-        ctxt = cand.get("output") or ("[ERROR] " + cand.get("error") if cand.get("error") else "")
+        btxt = base.get("output") or (
+            "[ERROR] " + base.get("error") if base.get("error") else ""
+        )
+        ctxt = cand.get("output") or (
+            "[ERROR] " + cand.get("error") if cand.get("error") else ""
+        )
 
         bflags = ",".join(base.get("flags") or [])
         cflags = ",".join(cand.get("flags") or [])
@@ -462,11 +502,15 @@ def write_ab_report_html(
         parts.append(f"<hr><h2 id='f-{_html_escape(name)}'>{_html_escape(name)}</h2>")
         parts.append("<div class='grid'>")
         parts.append("<div class='card'>")
-        parts.append(f"<div><strong>Baseline</strong> <span class='flags'>{_html_escape(bflags) if bflags else ''}</span></div>")
+        parts.append(
+            f"<div><strong>Baseline</strong> <span class='flags'>{_html_escape(bflags) if bflags else ''}</span></div>"
+        )
         parts.append(f"<pre>{_html_escape(str(btxt))}</pre>")
         parts.append("</div>")
         parts.append("<div class='card'>")
-        parts.append(f"<div><strong>Candidate</strong> <span class='flags'>{_html_escape(cflags) if cflags else ''}</span></div>")
+        parts.append(
+            f"<div><strong>Candidate</strong> <span class='flags'>{_html_escape(cflags) if cflags else ''}</span></div>"
+        )
         parts.append(f"<pre>{_html_escape(str(ctxt))}</pre>")
         parts.append("</div>")
         parts.append("</div>")
@@ -544,7 +588,9 @@ def _prompt_int(label: str, default: int, min_v: int, max_v: int) -> int:
 
 def interactive_flow(default_prompts_url: str) -> int:
     print("Prompt Workbench — Interactive")
-    print("This will call the OpenAI API and save outputs under tools/prompt_workbench/out/<timestamp>.")
+    print(
+        "This will call the OpenAI API and save outputs under tools/prompt_workbench/out/<timestamp>."
+    )
     print("Key source: OPENAI_API_KEY (recommended: put it in .env.local once)")
 
     mode = _prompt_choice("Which prompt mode?", list(MODES), default="reg_chat")
@@ -560,10 +606,14 @@ def interactive_flow(default_prompts_url: str) -> int:
     )
 
     print("\nFixture count (what 'max fixtures' means)")
-    print("- Fixtures are the text files in tools/prompt_workbench/fixtures/<mode>/*.txt")
+    print(
+        "- Fixtures are the text files in tools/prompt_workbench/fixtures/<mode>/*.txt"
+    )
     print("- max fixtures = how many of those test inputs to run")
     print("- Use 1–3 while iterating; use 0 to run ALL for confidence")
-    max_fx = _prompt_int("How many fixtures to run? (0 = all)", default=3, min_v=0, max_v=200)
+    max_fx = _prompt_int(
+        "How many fixtures to run? (0 = all)", default=3, min_v=0, max_v=200
+    )
 
     argv: List[str] = ["--mode", mode]
     if max_fx > 0:
@@ -573,7 +623,10 @@ def interactive_flow(default_prompts_url: str) -> int:
     argv += ["--load-env"]
 
     if run_type.startswith("Single run (remote"):
-        url = input(f"Remote prompts URL [{default_prompts_url}]: ").strip() or default_prompts_url
+        url = (
+            input(f"Remote prompts URL [{default_prompts_url}]: ").strip()
+            or default_prompts_url
+        )
         argv += ["--prompts-url", url]
         return main_argv(argv)
 
@@ -588,6 +641,7 @@ def interactive_flow(default_prompts_url: str) -> int:
 
 # Split core execution so interactive can call it
 
+
 def _try_open_path(path: Path) -> None:
     """Best-effort open a file or folder using the OS default handler."""
     try:
@@ -595,14 +649,21 @@ def _try_open_path(path: Path) -> None:
             os.startfile(str(path))  # type: ignore[attr-defined]
             return
         # mac/linux best-effort
-        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
+        subprocess.Popen(
+            ["open" if sys.platform == "darwin" else "xdg-open", str(path)]
+        )
     except Exception:
         pass
 
 
 def main_argv(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(description="Prompt Workbench")
-    parser.add_argument("--app-id", type=str, default="", help="Optional appId used for prompts/fixtures defaults")
+    parser.add_argument(
+        "--app-id",
+        type=str,
+        default="",
+        help="Optional appId used for prompts/fixtures defaults",
+    )
     parser.add_argument("--mode", required=True, choices=MODES)
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--temperature", type=float, default=0.4)
@@ -613,10 +674,15 @@ def main_argv(argv: Sequence[str]) -> int:
         "--out-dir",
         type=str,
         default="",
-        help="Override output directory (defaults to workbench/out)",
+        help="Override output directory (defaults to tools/workbench-web/out)",
     )
 
-    parser.add_argument("--fixtures-dir", type=str, default="", help="Override fixtures dir (defaults to ./fixtures)")
+    parser.add_argument(
+        "--fixtures-dir",
+        type=str,
+        default="",
+        help="Override fixtures dir (defaults to ./fixtures)",
+    )
 
     # Single-run prompt source
     parser.add_argument("--prompts-path", type=str, default="")
@@ -633,11 +699,15 @@ def main_argv(argv: Sequence[str]) -> int:
 
     # Utility
     parser.add_argument("--validate-only", action="store_true")
-    parser.add_argument("--dry-run", action="store_true", help="No OpenAI calls. Writes placeholder outputs + manifest.")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="No OpenAI calls. Writes placeholder outputs + manifest.",
+    )
     parser.add_argument(
         "--load-env",
         action="store_true",
-        help="Load OPENAI_API_KEY (and other vars) from .env.local/.env in the workbench folder (gitignored).",
+        help="Load OPENAI_API_KEY (and other vars) from .env.local/.env in tools/workbench-web (gitignored).",
     )
     parser.add_argument(
         "--open",
@@ -659,9 +729,13 @@ def main_argv(argv: Sequence[str]) -> int:
 
     if ab_enabled:
         if not (args.baseline_prompts_path or args.baseline_prompts_url):
-            raise ValueError("A/B enabled: provide --baseline-prompts-path or --baseline-prompts-url")
+            raise ValueError(
+                "A/B enabled: provide --baseline-prompts-path or --baseline-prompts-url"
+            )
         if not (args.candidate_prompts_path or args.candidate_prompts_url):
-            raise ValueError("A/B enabled: provide --candidate-prompts-path or --candidate-prompts-url")
+            raise ValueError(
+                "A/B enabled: provide --candidate-prompts-path or --candidate-prompts-url"
+            )
 
     # Load local env BEFORE key checks.
     if args.load_env:
@@ -679,10 +753,16 @@ def main_argv(argv: Sequence[str]) -> int:
     else:
         # Best-effort: use the first prompts/*.json file
         candidates = sorted((repo_root / "prompts").glob("*.json"))
-        default_prompts_path = candidates[0] if candidates else (repo_root / "prompts" / "template.json")
+        default_prompts_path = (
+            candidates[0] if candidates else (repo_root / "prompts" / "template.json")
+        )
 
     # Load fixtures
-    fixtures_dir = Path(args.fixtures_dir).resolve() if args.fixtures_dir else (repo_root / "fixtures")
+    fixtures_dir = (
+        Path(args.fixtures_dir).resolve()
+        if args.fixtures_dir
+        else (repo_root / "fixtures")
+    )
     fixtures = load_fixtures(fixtures_dir, args.mode, app_id=app_id)
     if args.max_fixtures and args.max_fixtures > 0:
         fixtures = fixtures[: args.max_fixtures]
@@ -690,12 +770,18 @@ def main_argv(argv: Sequence[str]) -> int:
     # Convenience map for printing inputs later
     fixture_input_by_name = {name: text for (name, text) in fixtures}
 
-    out_base = Path(args.out_dir).resolve() if args.out_dir else (Path(__file__).resolve().parent / "out")
+    out_base = (
+        Path(args.out_dir).resolve()
+        if args.out_dir
+        else (Path(__file__).resolve().parent / "out")
+    )
 
     if args.validate_only:
         # Validate prompt loading (single-run only) + fixtures presence.
         bundle, source_kind, source_id = load_prompts_bundle(
-            prompts_path=Path(args.prompts_path).resolve() if args.prompts_path else None,
+            prompts_path=(
+                Path(args.prompts_path).resolve() if args.prompts_path else None
+            ),
             prompts_url=args.prompts_url,
             default_prompts_path=default_prompts_path,
         )
@@ -729,7 +815,9 @@ def main_argv(argv: Sequence[str]) -> int:
         if not ab_enabled:
             # Load prompt (single-run only)
             bundle, source_kind, source_id = load_prompts_bundle(
-                prompts_path=Path(args.prompts_path).resolve() if args.prompts_path else None,
+                prompts_path=(
+                    Path(args.prompts_path).resolve() if args.prompts_path else None
+                ),
                 prompts_url=args.prompts_url,
                 default_prompts_path=default_prompts_path,
             )
@@ -749,7 +837,7 @@ def main_argv(argv: Sequence[str]) -> int:
 
             # Write placeholder outputs.
             results: Dict[str, Dict[str, Any]] = {}
-            for (name, _) in fixtures:
+            for name, _ in fixtures:
                 placeholder = f"[DRY_RUN] fixture={name} mode={args.mode}"
                 flags = basic_heuristic_flags(args.mode, placeholder)
                 write_output(out_root / "single", args.mode, name, placeholder)
@@ -769,12 +857,20 @@ def main_argv(argv: Sequence[str]) -> int:
 
         # A/B dry run
         baseline_bundle, baseline_kind, baseline_id = load_prompts_bundle(
-            prompts_path=Path(args.baseline_prompts_path).resolve() if args.baseline_prompts_path else None,
+            prompts_path=(
+                Path(args.baseline_prompts_path).resolve()
+                if args.baseline_prompts_path
+                else None
+            ),
             prompts_url=args.baseline_prompts_url,
             default_prompts_path=default_prompts_path,
         )
         candidate_bundle, candidate_kind, candidate_id = load_prompts_bundle(
-            prompts_path=Path(args.candidate_prompts_path).resolve() if args.candidate_prompts_path else None,
+            prompts_path=(
+                Path(args.candidate_prompts_path).resolve()
+                if args.candidate_prompts_path
+                else None
+            ),
             prompts_url=args.candidate_prompts_url,
             default_prompts_path=default_prompts_path,
         )
@@ -808,7 +904,7 @@ def main_argv(argv: Sequence[str]) -> int:
         baseline_results: Dict[str, Dict[str, Any]] = {}
         candidate_results: Dict[str, Dict[str, Any]] = {}
 
-        for (name, _) in fixtures:
+        for name, _ in fixtures:
             btxt = f"[DRY_RUN] variant=baseline fixture={name} mode={args.mode}"
             ctxt = f"[DRY_RUN] variant=candidate fixture={name} mode={args.mode}"
 
@@ -818,8 +914,20 @@ def main_argv(argv: Sequence[str]) -> int:
             write_output(out_root / "baseline", args.mode, name, btxt)
             write_output(out_root / "candidate", args.mode, name, ctxt)
 
-            baseline_results[name] = {"output": btxt, "error": None, "flags": bflags, "chars": len(btxt), "usage": {}}
-            candidate_results[name] = {"output": ctxt, "error": None, "flags": cflags, "chars": len(ctxt), "usage": {}}
+            baseline_results[name] = {
+                "output": btxt,
+                "error": None,
+                "flags": bflags,
+                "chars": len(btxt),
+                "usage": {},
+            }
+            candidate_results[name] = {
+                "output": ctxt,
+                "error": None,
+                "flags": cflags,
+                "chars": len(ctxt),
+                "usage": {},
+            }
 
         diffs_dir = out_root / "diffs" / args.mode
         diffs_dir.mkdir(parents=True, exist_ok=True)
@@ -828,8 +936,12 @@ def main_argv(argv: Sequence[str]) -> int:
         for name, _ in fixtures:
             a = baseline_results[name]["output"] or ""
             b = candidate_results[name]["output"] or ""
-            d = unified_diff(a, b, a_label=f"baseline/{name}", b_label=f"candidate/{name}")
-            write_text(diffs_dir / f"{name}.diff.txt", d if d.strip() else "[NO DIFF]\n")
+            d = unified_diff(
+                a, b, a_label=f"baseline/{name}", b_label=f"candidate/{name}"
+            )
+            write_text(
+                diffs_dir / f"{name}.diff.txt", d if d.strip() else "[NO DIFF]\n"
+            )
 
             diff_index[name] = {
                 "baseline": baseline_results[name],
@@ -875,7 +987,9 @@ def main_argv(argv: Sequence[str]) -> int:
 
     if not ab_enabled:
         bundle, source_kind, source_id = load_prompts_bundle(
-            prompts_path=Path(args.prompts_path).resolve() if args.prompts_path else None,
+            prompts_path=(
+                Path(args.prompts_path).resolve() if args.prompts_path else None
+            ),
             prompts_url=args.prompts_url,
             default_prompts_path=default_prompts_path,
         )
@@ -928,12 +1042,20 @@ def main_argv(argv: Sequence[str]) -> int:
 
     # A/B mode
     baseline_bundle, baseline_kind, baseline_id = load_prompts_bundle(
-        prompts_path=Path(args.baseline_prompts_path).resolve() if args.baseline_prompts_path else None,
+        prompts_path=(
+            Path(args.baseline_prompts_path).resolve()
+            if args.baseline_prompts_path
+            else None
+        ),
         prompts_url=args.baseline_prompts_url,
         default_prompts_path=default_prompts_path,
     )
     candidate_bundle, candidate_kind, candidate_id = load_prompts_bundle(
-        prompts_path=Path(args.candidate_prompts_path).resolve() if args.candidate_prompts_path else None,
+        prompts_path=(
+            Path(args.candidate_prompts_path).resolve()
+            if args.candidate_prompts_path
+            else None
+        ),
         prompts_url=args.candidate_prompts_url,
         default_prompts_path=default_prompts_path,
     )
@@ -1041,8 +1163,12 @@ def main_argv(argv: Sequence[str]) -> int:
             print("  INPUT:")
             print("  " + "\n  ".join(inp.splitlines()))
 
-        bout = b.get("output") or ("[ERROR] " + b.get("error") if b.get("error") else "")
-        cout = c.get("output") or ("[ERROR] " + c.get("error") if c.get("error") else "")
+        bout = b.get("output") or (
+            "[ERROR] " + b.get("error") if b.get("error") else ""
+        )
+        cout = c.get("output") or (
+            "[ERROR] " + c.get("error") if c.get("error") else ""
+        )
 
         if bout:
             print("  BASELINE:")
@@ -1075,4 +1201,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

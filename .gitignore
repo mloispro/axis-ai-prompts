@@ -1,15 +1,15 @@
 # Workbench local env / venv (never commit)
-workbench/.venv/
-workbench/.env.local
+tools/workbench-web/.venv/
+tools/workbench-web/.env.local
 
 # Workbench output artifacts
-workbench/out/
+tools/workbench-web/out/
 
 # CLI output artifacts
 out/
 
 # Workbench local draft state (never commit)
-workbench/state/
+tools/workbench-web/state/
 
 # Python caches
 **/__pycache__/
@@ -18,4 +18,9 @@ workbench/state/
 # OS/editor noise
 .DS_Store
 Thumbs.db
+
+# Node / Playwright (workbench UI e2e)
+tools/workbench-web/node_modules/
+tools/workbench-web/test-results/
+tools/workbench-web/playwright-report/
 

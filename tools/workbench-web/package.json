@@ -1,0 +1,12 @@
+{
+    "name": "axis-ai-prompts-workbench",
+    "private": true,
+    "devDependencies": {
+        "playwright": "^1.51.0"
+    },
+    "scripts": {
+        "e2e:setup": "npm install && npx playwright install",
+        "e2e:install": "npx playwright install",
+        "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\e2e.ps1"
+    }
+}

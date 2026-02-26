@@ -15,14 +15,14 @@ $env:OPENAI_API_KEY = "<your key>"
 Run a mode across fixtures using the prompts file:
 
 ```powershell
-cd C:\Projects\AndroidStudioProjects\ai-prompts
-python .\tools\workbench\workbench.py run --app rizzchatai --mode opener
+cd path\to\axis-ai-prompts
+python .\tools\workbench-cli\workbench.py run --app rizzchatai --mode opener
 ```
 
 A/B compare two prompt files (or two apps) across the same fixtures:
 
 ```powershell
-python .\tools\workbench\workbench.py ab --promptsA .\prompts\rizzchatai.json --promptsB .\prompts\rizzchatai.json --mode opener
+python .\tools\workbench-cli\workbench.py ab --promptsA .\prompts\rizzchatai.json --promptsB .\prompts\rizzchatai.json --mode opener
 ```
 
 ## Fixtures

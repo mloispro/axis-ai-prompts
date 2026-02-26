@@ -1,3 +1,8 @@
+# pylint: skip-file
+# flake8: noqa
+# ruff: noqa
+# pyright: ignore
+
 from __future__ import annotations
 
 import json
@@ -12,7 +17,20 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+def _find_repo_root(start: Path) -> Path:
+    cur = start.resolve()
+    if cur.is_file():
+        cur = cur.parent
+    for _ in range(10):
+        if (cur / "prompts").is_dir() and (cur / "fixtures").is_dir():
+            return cur
+        cur = cur.parent
+    raise RuntimeError(
+        "Could not locate repo root (expected folders 'prompts/' and 'fixtures/')."
+    )
+
+
+REPO_ROOT = _find_repo_root(Path(__file__))
 WEB_ROOT = Path(__file__).resolve().parent
 STATIC_DIR = WEB_ROOT / "static"
 
@@ -20,7 +38,7 @@ PROMPTS_DIR = REPO_ROOT / "prompts"
 OUT_DIR = WEB_ROOT / "out"
 FIXTURES_DIR = REPO_ROOT / "fixtures"
 
-# Candidate + optional local baseline live under workbench/state/ for local iteration (gitignored).
+# Candidate + optional local baseline live under tools/workbench-web/state/ for local iteration (gitignored).
 STATE_DIR = WEB_ROOT / "state"
 CANDIDATES_DIR = STATE_DIR / "candidates"
 BASELINES_DIR = STATE_DIR / "baselines"
@@ -45,6 +63,7 @@ def _default_app_id() -> str:
         raise HTTPException(status_code=500, detail="No apps found")
     return str(apps[0].get("appId") or "").strip()
 
+
 # Allow importing the engine module directly.
 sys.path.insert(0, str(WEB_ROOT))
 
@@ -60,7 +79,9 @@ AI_PROMPTS_INDEX_URL = os.getenv("AI_PROMPTS_INDEX_URL", "").strip()
 
 
 def _fetch_json_url(url: str, timeout_s: int = 15) -> Any:
-    req = urllib.request.Request(url, headers={"User-Agent": "ai-prompts-workbench/1.0"})
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "ai-prompts-workbench/1.0"}
+    )
     with urllib.request.urlopen(req, timeout=timeout_s) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -85,7 +106,12 @@ def _try_list_apps_local_index() -> Optional[List[Dict[str, Any]]]:
             app_id = (a.get("appId") or "").strip()
             if not app_id:
                 continue
-            out.append({"appId": app_id, "displayName": (a.get("displayName") or app_id).strip()})
+            out.append(
+                {
+                    "appId": app_id,
+                    "displayName": (a.get("displayName") or app_id).strip(),
+                }
+            )
         return out or None
     except Exception:
         return None
@@ -107,7 +133,9 @@ def _try_get_app_local_index(app_id: str) -> Optional[Dict[str, Any]]:
             if (a.get("appId") or "").strip() != app_id:
                 continue
 
-            prompts_path = (a.get("promptsPath") or f"prompts/{app_id}.json").lstrip("/")
+            prompts_path = (a.get("promptsPath") or f"prompts/{app_id}.json").lstrip(
+                "/"
+            )
             prompts_file = REPO_ROOT / prompts_path
             default_remote_url = (a.get("defaultRemotePromptsUrl") or "").strip()
             if not default_remote_url:
@@ -149,7 +177,12 @@ def _try_list_apps_remote() -> Optional[List[Dict[str, Any]]]:
             app_id = (a.get("appId") or "").strip()
             if not app_id:
                 continue
-            out.append({"appId": app_id, "displayName": (a.get("displayName") or app_id).strip()})
+            out.append(
+                {
+                    "appId": app_id,
+                    "displayName": (a.get("displayName") or app_id).strip(),
+                }
+            )
         return out or None
     except Exception:
         return None
@@ -170,7 +203,9 @@ def _try_get_app_remote(app_id: str) -> Optional[Dict[str, Any]]:
             if (a.get("appId") or "").strip() != app_id:
                 continue
 
-            prompts_path = (a.get("promptsPath") or f"prompts/{app_id}.json").lstrip("/")
+            prompts_path = (a.get("promptsPath") or f"prompts/{app_id}.json").lstrip(
+                "/"
+            )
             prompts_file = REPO_ROOT / prompts_path
             modes = a.get("modes")
             if not isinstance(modes, list) or not modes:
@@ -179,7 +214,9 @@ def _try_get_app_remote(app_id: str) -> Optional[Dict[str, Any]]:
             return {
                 "appId": app_id,
                 "displayName": (a.get("displayName") or app_id).strip(),
-                "defaultRemotePromptsUrl": (a.get("defaultRemotePromptsUrl") or "").strip(),
+                "defaultRemotePromptsUrl": (
+                    a.get("defaultRemotePromptsUrl") or ""
+                ).strip(),
                 "defaultPromptsPath": str(prompts_file),
                 "promptsPath": prompts_path,
                 "modes": modes,
@@ -235,13 +272,144 @@ def _get_app(app_id: str) -> Dict[str, Any]:
 def _latest_out_dir() -> Optional[Path]:
     if not OUT_DIR.exists():
         return None
+    # Only consider actual run directories created by the engine.
+    # The launcher also writes logs under out/launcher/ which should be ignored.
+    runs: List[Path] = []
+    for p in OUT_DIR.iterdir():
+        if not p.is_dir():
+            continue
+        if (p / "run.json").exists():
+            runs.append(p)
+
+    if runs:
+        return max(runs, key=lambda p: p.stat().st_mtime)
+
+    # Back-compat fallback: if nothing matches, return any directory.
     dirs = [p for p in OUT_DIR.iterdir() if p.is_dir()]
     if not dirs:
         return None
-    return sorted(dirs, key=lambda p: p.name, reverse=True)[0]
+    return max(dirs, key=lambda p: p.stat().st_mtime)
 
 
 app = FastAPI(title="Prompt Workbench Web", docs_url=None, redoc_url=None)
+
+
+@dataclass(frozen=True)
+class ModelPricing:
+    model: str
+    input_per_1m: float
+    cached_input_per_1m: float
+    output_per_1m: float
+    is_latest: bool = False
+
+
+# Prices per 1M tokens (input / cached input / output).
+# Source: OpenAI Developers pricing table.
+_MODEL_CATALOG: List[ModelPricing] = [
+    ModelPricing(
+        model="gpt-5.2",
+        input_per_1m=1.75,
+        cached_input_per_1m=0.175,
+        output_per_1m=14.00,
+        is_latest=True,
+    ),
+    ModelPricing(
+        model="gpt-5.1",
+        input_per_1m=1.25,
+        cached_input_per_1m=0.125,
+        output_per_1m=10.00,
+        is_latest=True,
+    ),
+    ModelPricing(
+        model="gpt-5-mini",
+        input_per_1m=0.25,
+        cached_input_per_1m=0.025,
+        output_per_1m=2.00,
+    ),
+    ModelPricing(
+        model="gpt-5-nano",
+        input_per_1m=0.05,
+        cached_input_per_1m=0.005,
+        output_per_1m=0.40,
+    ),
+    ModelPricing(
+        model="gpt-4.1",
+        input_per_1m=2.00,
+        cached_input_per_1m=0.50,
+        output_per_1m=8.00,
+    ),
+    ModelPricing(
+        model="gpt-4.1-mini",
+        input_per_1m=0.40,
+        cached_input_per_1m=0.10,
+        output_per_1m=1.60,
+    ),
+    ModelPricing(
+        model="gpt-4.1-nano",
+        input_per_1m=0.10,
+        cached_input_per_1m=0.025,
+        output_per_1m=0.40,
+    ),
+    ModelPricing(
+        model="gpt-4o",
+        input_per_1m=2.50,
+        cached_input_per_1m=1.25,
+        output_per_1m=10.00,
+    ),
+    ModelPricing(
+        model="gpt-4o-mini",
+        input_per_1m=0.15,
+        cached_input_per_1m=0.075,
+        output_per_1m=0.60,
+    ),
+]
+
+
+def _pick_models_for_dropdown() -> List[ModelPricing]:
+    latest = [m for m in _MODEL_CATALOG if m.is_latest][:2]
+
+    def _score(m: ModelPricing) -> float:
+        # "Least costly" is ambiguous; for a simple heuristic, rank by input+output.
+        return float(m.input_per_1m) + float(m.output_per_1m)
+
+    chosen = {m.model for m in latest}
+    cheapest = [m for m in sorted(_MODEL_CATALOG, key=_score) if m.model not in chosen][
+        :2
+    ]
+    return latest + cheapest
+
+
+def _pricing_by_model(model: str) -> Optional[ModelPricing]:
+    model = (model or "").strip()
+    for m in _MODEL_CATALOG:
+        if m.model == model:
+            return m
+    return None
+
+
+def _compute_cost_usd(usage: Dict[str, Any], pricing: ModelPricing) -> Dict[str, Any]:
+    def _i(key: str) -> int:
+        try:
+            return int(usage.get(key) or 0)
+        except Exception:
+            return 0
+
+    input_tokens = _i("inputTokens")
+    output_tokens = _i("outputTokens")
+    cached_tokens = _i("cachedTokens")
+    cached_tokens = max(0, min(cached_tokens, input_tokens))
+    non_cached_in = input_tokens - cached_tokens
+
+    in_usd = (non_cached_in / 1_000_000.0) * pricing.input_per_1m
+    cached_in_usd = (cached_tokens / 1_000_000.0) * pricing.cached_input_per_1m
+    out_usd = (output_tokens / 1_000_000.0) * pricing.output_per_1m
+    total = in_usd + cached_in_usd + out_usd
+    return {
+        "inputUsd": in_usd,
+        "cachedInputUsd": cached_in_usd,
+        "outputUsd": out_usd,
+        "totalUsd": total,
+    }
 
 
 def _read_json(path: Path) -> Any:
@@ -263,6 +431,22 @@ def api_app(app_id: str) -> JSONResponse:
     return JSONResponse(_get_app(app_id))
 
 
+@app.get("/api/models")
+def api_models() -> JSONResponse:
+    models = []
+    for m in _pick_models_for_dropdown():
+        models.append(
+            {
+                "model": m.model,
+                "inputPer1M": m.input_per_1m,
+                "cachedInputPer1M": m.cached_input_per_1m,
+                "outputPer1M": m.output_per_1m,
+                "isLatest": bool(m.is_latest),
+            }
+        )
+    return JSONResponse({"models": models})
+
+
 @app.get("/api/candidate-prompts")
 def api_get_candidate(appId: str = "") -> JSONResponse:
     _ensure_state_dirs()
@@ -277,11 +461,68 @@ def api_get_candidate(appId: str = "") -> JSONResponse:
             path.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
         else:
             path.write_text(
-                json.dumps({"version": 1, "updatedAt": "", "ttlSeconds": 3600, "prompts": {}}, indent=2),
+                json.dumps(
+                    {"version": 1, "updatedAt": "", "ttlSeconds": 3600, "prompts": {}},
+                    indent=2,
+                ),
                 encoding="utf-8",
             )
 
-    return JSONResponse(_read_json(path))
+    cand_obj = _read_json(path)
+
+    # Ensure candidate includes all canonical prompt keys so switching modes
+    # always loads the real baseline prompt text for that mode.
+    try:
+        canonical_path = Path(str(cfg.get("defaultPromptsPath") or ""))
+        if canonical_path.exists():
+            canonical_obj = _read_json(canonical_path)
+            canonical_prompts = (
+                (canonical_obj.get("prompts") or {})
+                if isinstance(canonical_obj, dict)
+                else {}
+            )
+
+            if not isinstance(cand_obj, dict):
+                cand_obj = {
+                    "version": 1,
+                    "updatedAt": "",
+                    "ttlSeconds": 3600,
+                    "prompts": {},
+                }
+
+            cand_prompts = cand_obj.get("prompts")
+            if not isinstance(cand_prompts, dict):
+                cand_prompts = {}
+                cand_obj["prompts"] = cand_prompts
+
+            changed = False
+            if isinstance(canonical_prompts, dict):
+                for k, v in canonical_prompts.items():
+                    if not isinstance(k, str):
+                        continue
+                    if isinstance(v, str):
+                        if k not in cand_prompts:
+                            cand_prompts[k] = v
+                            changed = True
+                            continue
+
+                        existing = cand_prompts.get(k)
+                        existing_is_blank = (
+                            existing is None
+                            or (isinstance(existing, str) and not existing.strip())
+                            or (not isinstance(existing, str))
+                        )
+                        if existing_is_blank and v.strip():
+                            cand_prompts[k] = v
+                            changed = True
+
+            if changed:
+                path.write_text(json.dumps(cand_obj, indent=2), encoding="utf-8")
+    except Exception:
+        # Best-effort only; never fail candidate load due to merge issues.
+        pass
+
+    return JSONResponse(cand_obj)
 
 
 @app.put("/api/candidate-prompts")
@@ -296,6 +537,79 @@ def api_put_candidate(payload: Dict[str, Any], appId: str = "") -> JSONResponse:
 
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/run/tune")
+def api_run_tune(payload: Dict[str, Any]) -> JSONResponse:
+    app_id = (payload.get("appId") or "").strip() or _default_app_id()
+    mode = (payload.get("mode") or "").strip() or "opener"
+    model = (payload.get("model") or "").strip() or "gpt-4o-mini"
+    system_prompt = (payload.get("systemPrompt") or "").rstrip()
+    user_prompt = (payload.get("userPrompt") or "").rstrip()
+    dry_run = bool(payload.get("dryRun") or False)
+
+    _ = _get_app(app_id)
+
+    pricing = _pricing_by_model(model)
+    if pricing is None:
+        raise HTTPException(status_code=400, detail=f"Unknown model '{model}'.")
+
+    if dry_run:
+        usage = {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "totalTokens": 0,
+            "cachedTokens": 0,
+        }
+        cost = _compute_cost_usd(usage, pricing)
+        return JSONResponse(
+            {
+                "model": model,
+                "outputText": "[DRY RUN] (no API call made)",
+                "usage": usage,
+                "pricing": {
+                    "inputPer1M": pricing.input_per_1m,
+                    "cachedInputPer1M": pricing.cached_input_per_1m,
+                    "outputPer1M": pricing.output_per_1m,
+                },
+                "cost": cost,
+            }
+        )
+
+    try:
+        engine.ensure_api_key()
+        messages = engine.build_messages(system_prompt, user_prompt)
+        text, usage = engine.call_openai(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            max_output_tokens=512,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    # Ensure cost computation has numeric keys present.
+    usage_norm = {
+        "inputTokens": int(usage.get("inputTokens") or 0),
+        "outputTokens": int(usage.get("outputTokens") or 0),
+        "totalTokens": int(usage.get("totalTokens") or 0),
+        "cachedTokens": int(usage.get("cachedTokens") or 0),
+    }
+    cost = _compute_cost_usd(usage_norm, pricing)
+
+    return JSONResponse(
+        {
+            "model": model,
+            "outputText": text,
+            "usage": usage_norm,
+            "pricing": {
+                "inputPer1M": pricing.input_per_1m,
+                "cachedInputPer1M": pricing.cached_input_per_1m,
+                "outputPer1M": pricing.output_per_1m,
+            },
+            "cost": cost,
+        }
+    )
 
 
 @dataclass
@@ -313,6 +627,7 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
     mode = (payload.get("mode") or "").strip()
     model = (payload.get("model") or "").strip() or "gpt-4o-mini"
     max_fx = int(payload.get("maxFixtures") or 0)
+    dry_run = bool(payload.get("dryRun") or False)
     baseline_source = (payload.get("baselineSource") or "local_file").strip()
     remote_url = (payload.get("remoteUrl") or "").strip()
 
@@ -325,7 +640,6 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
     # Build argv for engine main_argv.
     argv: List[str] = [
         "--load-env",
-        "--open",
         "--app-id",
         app_id,
         "--fixtures-dir",
@@ -337,6 +651,8 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
         "--out-dir",
         str(OUT_DIR),
     ]
+    if dry_run:
+        argv += ["--dry-run"]
     if max_fx > 0:
         argv += ["--max-fixtures", str(max_fx)]
 
@@ -348,7 +664,14 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
         else:
             argv += ["--baseline-prompts-url", url]
     else:
-        argv += ["--baseline-prompts-path", str(baseline_path if baseline_path.exists() else cfg.get("defaultPromptsPath"))]
+        argv += [
+            "--baseline-prompts-path",
+            str(
+                baseline_path
+                if baseline_path.exists()
+                else cfg.get("defaultPromptsPath")
+            ),
+        ]
 
     # Candidate is always local draft per app.
     if not candidate_path.exists():
@@ -358,7 +681,10 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
             candidate_path.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
         else:
             candidate_path.write_text(
-                json.dumps({"version": 1, "updatedAt": "", "ttlSeconds": 3600, "prompts": {}}, indent=2),
+                json.dumps(
+                    {"version": 1, "updatedAt": "", "ttlSeconds": 3600, "prompts": {}},
+                    indent=2,
+                ),
                 encoding="utf-8",
             )
 
@@ -461,4 +787,6 @@ def api_open_last() -> JSONResponse:
 
 @app.get("/api/config")
 def api_config() -> JSONResponse:
-    return JSONResponse({"aiPromptsIndexUrl": AI_PROMPTS_INDEX_URL, "repoRoot": str(REPO_ROOT)})
+    return JSONResponse(
+        {"aiPromptsIndexUrl": AI_PROMPTS_INDEX_URL, "repoRoot": str(REPO_ROOT)}
+    )

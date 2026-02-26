@@ -4,6 +4,11 @@
 - This is a **public prompt catalog**: canonical prompt JSON lives in `prompts/<appId>.json`.
 - Treat everything here as public: **never add secrets/PII** (API keys must not be committed).
 
+## Consumer model (important)
+- This repo is **not** the production app.
+- A **separate consumer app** (e.g., Android) may fetch `prompts/<appId>.json` from public GitHub and then inject runtime inputs before calling the model.
+- The workbenches under `tools/` are for local iteration + regression checking against `fixtures/`.
+
 ## Prompt file conventions
 - Prompt JSON is loaded by `tools/workbench-cli/workbench.py`.
 - Supported schemas:

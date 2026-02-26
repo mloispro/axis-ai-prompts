@@ -416,6 +416,46 @@ def _read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _list_fixture_files(*, app_id: str, mode: str) -> List[Dict[str, Any]]:
+    mode = (mode or "").strip()
+    if mode not in ("opener", "app_chat", "reg_chat"):
+        raise HTTPException(status_code=400, detail=f"Unknown mode '{mode}'.")
+
+    app_id = (app_id or "").strip() or _default_app_id()
+
+    searched: List[Path] = []
+    mode_dir = FIXTURES_DIR / app_id / mode
+    searched.append(mode_dir)
+    if app_id and not mode_dir.exists():
+        mode_dir = FIXTURES_DIR / mode
+        searched.append(mode_dir)
+
+    if not mode_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Missing fixtures dir. Searched: {', '.join(str(p) for p in searched)}",
+        )
+
+    files = sorted(
+        [
+            p
+            for p in list(mode_dir.glob("*.txt")) + list(mode_dir.glob("*.json"))
+            if p.is_file()
+        ]
+    )
+
+    items: List[Dict[str, Any]] = []
+    for p in files:
+        items.append(
+            {
+                "name": p.stem,
+                "file": p.name,
+                "kind": p.suffix.lstrip(".").lower(),
+            }
+        )
+    return items
+
+
 @app.get("/")
 def index() -> FileResponse:
     return FileResponse(str(STATIC_DIR / "index.html"))
@@ -445,6 +485,84 @@ def api_models() -> JSONResponse:
             }
         )
     return JSONResponse({"models": models})
+
+
+@app.get("/api/fixtures")
+def api_fixtures(appId: str = "", mode: str = "") -> JSONResponse:
+    app_id = (appId or "").strip() or _default_app_id()
+    mode = (mode or "").strip() or "opener"
+    _ = _get_app(app_id)
+    fixtures = _list_fixture_files(app_id=app_id, mode=mode)
+    return JSONResponse({"appId": app_id, "mode": mode, "fixtures": fixtures})
+
+
+@app.post("/api/compose")
+def api_compose(payload: Dict[str, Any]) -> JSONResponse:
+    """Render composed messages (baseline vs candidate) for a single fixture.
+
+    This is intentionally no-network: it only loads prompt bundles + fixture files
+    and renders the user template when the fixture is structured (.json).
+    """
+
+    app_id = (payload.get("appId") or "").strip() or _default_app_id()
+    mode = (payload.get("mode") or "").strip() or "opener"
+    fixture = (payload.get("fixture") or "").strip()
+    candidate_system_override = (payload.get("systemPrompt") or "").rstrip()
+    candidate_user_template_override = (payload.get("userTemplate") or "").rstrip()
+
+    if not fixture:
+        raise HTTPException(status_code=400, detail="fixture is required")
+
+    cfg = _get_app(app_id)
+
+    # Baseline bundle: canonical prompts file.
+    baseline_path = Path(str(cfg.get("defaultPromptsPath") or "")).resolve()
+    if not baseline_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Baseline prompts file not found: {baseline_path}",
+        )
+    baseline_bundle = engine.load_prompts_json_from_bytes(
+        baseline_path.read_bytes(), source=str(baseline_path)
+    )
+
+    # Fixture file (supports .txt + .json).
+    try:
+        fixture_files = engine.load_fixture_files(
+            FIXTURES_DIR, mode, app_id=app_id, only_fixture=fixture
+        )
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    fx = fixture_files[0]
+    fx_kind = fx.suffix.lstrip(".").lower()
+
+    baseline_system = engine.system_prompt_for_mode(baseline_bundle, mode)
+    baseline_user_template = engine.user_template_for_mode(baseline_bundle, mode)
+
+    # Candidate: for preview, prefer the live overrides from the editor.
+    candidate_system = candidate_system_override
+    candidate_user_template = candidate_user_template_override
+
+    try:
+        baseline_user = engine.render_fixture_user_prompt(
+            fx, mode=mode, user_template=baseline_user_template
+        )
+        candidate_user = engine.render_fixture_user_prompt(
+            fx, mode=mode, user_template=candidate_user_template
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return JSONResponse(
+        {
+            "appId": app_id,
+            "mode": mode,
+            "fixture": {"name": fx.stem, "kind": fx_kind, "file": fx.name},
+            "baseline": {"system": baseline_system, "user": baseline_user},
+            "candidate": {"system": candidate_system, "user": candidate_user},
+        }
+    )
 
 
 @app.get("/api/candidate-prompts")
@@ -627,6 +745,7 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
     mode = (payload.get("mode") or "").strip()
     model = (payload.get("model") or "").strip() or "gpt-4o-mini"
     max_fx = int(payload.get("maxFixtures") or 0)
+    only_fixture = (payload.get("fixture") or "").strip()
     dry_run = bool(payload.get("dryRun") or False)
     baseline_source = (payload.get("baselineSource") or "local_file").strip()
     remote_url = (payload.get("remoteUrl") or "").strip()
@@ -655,6 +774,8 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
         argv += ["--dry-run"]
     if max_fx > 0:
         argv += ["--max-fixtures", str(max_fx)]
+    if only_fixture:
+        argv += ["--only-fixture", only_fixture]
 
     if baseline_source == "remote_url":
         url = remote_url or cfg.get("defaultRemotePromptsUrl")
@@ -705,14 +826,13 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
     if not out:
         raise HTTPException(status_code=500, detail="No output directory created")
 
+    run_manifest = _read_json(out / "run.json")
+    ordered_fixtures = run_manifest.get("fixtures") or []
+    if not isinstance(ordered_fixtures, list):
+        ordered_fixtures = []
+
     ab_summary = out / "ab_summary.json"
     diff_index = _read_json(ab_summary)
-
-    # Load fixture inputs
-    fixtures = engine.load_fixtures(FIXTURES_DIR, mode, app_id=app_id)
-    if max_fx > 0:
-        fixtures = fixtures[:max_fx]
-    fixture_input = {n: t for (n, t) in fixtures}
 
     items: List[Dict[str, Any]] = []
     totals: Dict[str, int] = {
@@ -725,12 +845,17 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
         "candidateTotalTokens": 0,
         "candidateCachedTokens": 0,
     }
-    for name in fixture_input.keys():
+    fixture_names = ordered_fixtures or list((diff_index or {}).keys())
+    for name in fixture_names:
         di = diff_index.get(name) or {}
-        b = (di.get("baseline") or {}).get("output") or ""
-        c = (di.get("candidate") or {}).get("output") or ""
-        bu = (di.get("baseline") or {}).get("usage") or {}
-        cu = (di.get("candidate") or {}).get("usage") or {}
+        bobj = di.get("baseline") or {}
+        cobj = di.get("candidate") or {}
+        b = bobj.get("output") or ""
+        c = cobj.get("output") or ""
+        binp = bobj.get("input") or ""
+        cinp = cobj.get("input") or ""
+        bu = bobj.get("usage") or {}
+        cu = cobj.get("usage") or {}
         df = di.get("diffFile") or ""
 
         def _add(prefix: str, usage: Dict[str, Any]) -> None:
@@ -748,7 +873,9 @@ def api_run_ab(payload: Dict[str, Any]) -> JSONResponse:
         items.append(
             {
                 "fixture": name,
-                "input": fixture_input.get(name, ""),
+                "input": cinp or binp,
+                "baselineInput": binp,
+                "candidateInput": cinp,
                 "baselineOutput": b,
                 "candidateOutput": c,
                 "baselineUsage": bu,

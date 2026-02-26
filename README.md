@@ -2,6 +2,11 @@
 
 A personal, public prompts repo intended to be **readable by anyone** but **writable only by you**.
 
+## Consumer model (source of truth)
+- `prompts/<appId>.json` is the canonical prompt bundle.
+- **Apps consume these prompt files directly** (for example: a separate Android app can fetch the JSON from public GitHub and then inject runtime inputs before calling the model).
+- The workbenches in `tools/` are **local developer utilities** for editing/iterating and running fixture suites to prevent regressions; they are not the production app.
+
 ## Structure (organized by app)
 - `prompts/<appId>.json` — canonical prompt files consumed by apps (stable paths)
 - `fixtures/<appId>/<mode>/*.txt` — sample user inputs for iterating (optional)

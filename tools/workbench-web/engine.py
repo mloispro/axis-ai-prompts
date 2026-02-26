@@ -61,6 +61,9 @@ class PromptBundle:
     opener_system: str
     app_chat_system: str
     reg_chat_system: str
+    opener_user: str
+    app_chat_user: str
+    reg_chat_user: str
 
 
 def _repo_root() -> Path:
@@ -168,6 +171,9 @@ def load_prompts_json_from_bytes(data: bytes, source: str) -> PromptBundle:
         opener_system=_s("openerSystem"),
         app_chat_system=_s("appChatSystem"),
         reg_chat_system=_s("regChatSystem"),
+        opener_user=_s("openerUser"),
+        app_chat_user=_s("appChatUser"),
+        reg_chat_user=_s("regChatUser"),
     )
 
 
@@ -208,6 +214,123 @@ def system_prompt_for_mode(bundle: PromptBundle, mode: str) -> str:
         "app_chat": bundle.app_chat_system,
         "reg_chat": bundle.reg_chat_system,
     }[mode]
+
+
+def user_template_for_mode(bundle: PromptBundle, mode: str) -> str:
+    return {
+        "opener": bundle.opener_user,
+        "app_chat": bundle.app_chat_user,
+        "reg_chat": bundle.reg_chat_user,
+    }[mode]
+
+
+_TEMPLATE_VAR_RE = re.compile(r"\{\{([a-zA-Z0-9_]+)\}\}")
+
+
+def _collapse_blank_lines(s: str) -> str:
+    s = s.replace("\r\n", "\n")
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip() + "\n"
+
+
+def _render_template(template: str, template_vars: Dict[str, str]) -> str:
+    def repl(m: re.Match) -> str:
+        key = m.group(1)
+        return str(template_vars.get(key, ""))
+
+    rendered = _TEMPLATE_VAR_RE.sub(repl, template)
+    return _collapse_blank_lines(rendered)
+
+
+def _tie_in_block(tie_in: str) -> str:
+    cleaned = (tie_in or "").strip()
+    if not cleaned:
+        return ""
+    return f"Naturally work in this topic if possible: {cleaned}"
+
+
+def load_fixture_files(
+    fixtures_dir: Path, mode: str, *, app_id: str = "", only_fixture: str = ""
+) -> List[Path]:
+    """Return fixture files for a mode.
+
+    Preferred layout:
+      fixtures/<appId>/<mode>/*.{txt,json}
+
+    Legacy fallback:
+      fixtures/<mode>/*.{txt,json}
+    """
+
+    mode = mode.strip()
+    app_id = app_id.strip()
+    only_norm = (only_fixture or "").strip()
+
+    searched: List[Path] = []
+    files: List[Path] = []
+
+    mode_dir = fixtures_dir / app_id / mode if app_id else fixtures_dir / mode
+    searched.append(mode_dir)
+    if app_id and not mode_dir.exists():
+        mode_dir = fixtures_dir / mode
+        searched.append(mode_dir)
+
+    if mode_dir.exists():
+        files = sorted(
+            [
+                p
+                for p in list(mode_dir.glob("*.txt")) + list(mode_dir.glob("*.json"))
+                if p.is_file()
+            ]
+        )
+
+    if not files:
+        raise FileNotFoundError(
+            "Missing fixtures. Searched: " + ", ".join(str(p) for p in searched)
+        )
+
+    if only_norm:
+        matched = [p for p in files if p.name == only_norm or p.stem == only_norm]
+        if not matched:
+            raise FileNotFoundError(f"Fixture '{only_norm}' not found in {mode_dir}")
+        return matched
+
+    return files
+
+
+def render_fixture_user_prompt(fx: Path, *, mode: str, user_template: str) -> str:
+    """Render a fixture into a user prompt.
+
+    - .txt fixtures are treated as already-rendered user prompts.
+    - .json fixtures are structured and rendered through the per-mode user template.
+    """
+
+    if fx.suffix.lower() == ".txt":
+        return fx.read_text(encoding="utf-8").strip()
+
+    if fx.suffix.lower() != ".json":
+        raise ValueError(f"Unsupported fixture type: {fx.name}")
+
+    payload = json.loads(fx.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Fixture JSON must be an object: {fx.name}")
+
+    raw_override = payload.get("user_prompt")
+    if isinstance(raw_override, str) and raw_override.strip():
+        return raw_override.strip()
+
+    if not (user_template or "").strip():
+        raise ValueError(
+            f"No user template found for mode '{mode}', but fixture is .json: {fx.name}"
+        )
+
+    tie_in = str(payload.get("tie_in") or "")
+    template_vars: Dict[str, str] = {
+        "tie_in": tie_in,
+        "tie_in_block": _tie_in_block(tie_in),
+        "profile_text": str(payload.get("profile_text") or ""),
+        "chat_transcript": str(payload.get("chat_transcript") or ""),
+    }
+    return _render_template(user_template, template_vars)
 
 
 def load_fixtures(
@@ -435,6 +558,7 @@ def run_one(
         write_output(out_path, mode, name, safe)
 
         results[name] = {
+            "input": user_text,
             "output": output,
             "error": error,
             "flags": flags,
@@ -669,6 +793,12 @@ def main_argv(argv: Sequence[str]) -> int:
     parser.add_argument("--temperature", type=float, default=0.4)
     parser.add_argument("--max-output-tokens", type=int, default=200)
     parser.add_argument("--max-fixtures", type=int, default=0, help="0 = all")
+    parser.add_argument(
+        "--only-fixture",
+        type=str,
+        default="",
+        help="Optional fixture selector (matches file name or stem)",
+    )
 
     parser.add_argument(
         "--out-dir",
@@ -757,18 +887,17 @@ def main_argv(argv: Sequence[str]) -> int:
             candidates[0] if candidates else (repo_root / "prompts" / "template.json")
         )
 
-    # Load fixtures
+    # Load fixture files (rendering happens after we know which prompt bundle we use).
     fixtures_dir = (
         Path(args.fixtures_dir).resolve()
         if args.fixtures_dir
         else (repo_root / "fixtures")
     )
-    fixtures = load_fixtures(fixtures_dir, args.mode, app_id=app_id)
+    fixture_files = load_fixture_files(
+        fixtures_dir, args.mode, app_id=app_id, only_fixture=args.only_fixture
+    )
     if args.max_fixtures and args.max_fixtures > 0:
-        fixtures = fixtures[: args.max_fixtures]
-
-    # Convenience map for printing inputs later
-    fixture_input_by_name = {name: text for (name, text) in fixtures}
+        fixture_files = fixture_files[: args.max_fixtures]
 
     out_base = (
         Path(args.out_dir).resolve()
@@ -789,7 +918,14 @@ def main_argv(argv: Sequence[str]) -> int:
         if args.system_override_file:
             sp = _read_text_file(Path(args.system_override_file))
 
-        print(f"OK: fixtures loaded: {len(fixtures)} for mode={args.mode}")
+        # Validate fixture rendering (supports both .txt and structured .json).
+        ut = user_template_for_mode(bundle, args.mode)
+        _ = [
+            (p.stem, render_fixture_user_prompt(p, mode=args.mode, user_template=ut))
+            for p in fixture_files
+        ]
+
+        print(f"OK: fixtures loaded: {len(fixture_files)} for mode={args.mode}")
         print(f"OK: prompts loaded: {source_kind} {source_id}")
         print(f"System prompt sha256={_sha256_text(sp)[:12]}…")
         return 0
@@ -807,7 +943,7 @@ def main_argv(argv: Sequence[str]) -> int:
             "temperature": args.temperature,
             "maxOutputTokens": args.max_output_tokens,
             "fixturesDir": str(fixtures_dir),
-            "fixtures": [name for (name, _) in fixtures],
+            "fixtures": [p.stem for p in fixture_files],
             "gitHeadSha": git_sha,
             "dryRun": True,
         }
@@ -824,6 +960,17 @@ def main_argv(argv: Sequence[str]) -> int:
             system_prompt = system_prompt_for_mode(bundle, args.mode)
             if args.system_override_file:
                 system_prompt = _read_text_file(Path(args.system_override_file))
+
+            user_template = user_template_for_mode(bundle, args.mode)
+            fixtures = [
+                (
+                    p.stem,
+                    render_fixture_user_prompt(
+                        p, mode=args.mode, user_template=user_template
+                    ),
+                )
+                for p in fixture_files
+            ]
 
             manifest.update(
                 {
@@ -842,6 +989,7 @@ def main_argv(argv: Sequence[str]) -> int:
                 flags = basic_heuristic_flags(args.mode, placeholder)
                 write_output(out_root / "single", args.mode, name, placeholder)
                 results[name] = {
+                    "input": dict(fixtures).get(name, ""),
                     "output": placeholder,
                     "error": None,
                     "flags": flags,
@@ -901,10 +1049,35 @@ def main_argv(argv: Sequence[str]) -> int:
             }
         )
 
+        baseline_ut = user_template_for_mode(baseline_bundle, args.mode)
+        candidate_ut = user_template_for_mode(candidate_bundle, args.mode)
+
+        baseline_fixtures = [
+            (
+                p.stem,
+                render_fixture_user_prompt(
+                    p, mode=args.mode, user_template=baseline_ut
+                ),
+            )
+            for p in fixture_files
+        ]
+        candidate_fixtures = [
+            (
+                p.stem,
+                render_fixture_user_prompt(
+                    p, mode=args.mode, user_template=candidate_ut
+                ),
+            )
+            for p in fixture_files
+        ]
+
+        baseline_input_by_name = {n: t for (n, t) in baseline_fixtures}
+        candidate_input_by_name = {n: t for (n, t) in candidate_fixtures}
+
         baseline_results: Dict[str, Dict[str, Any]] = {}
         candidate_results: Dict[str, Dict[str, Any]] = {}
 
-        for name, _ in fixtures:
+        for name, _ in baseline_fixtures:
             btxt = f"[DRY_RUN] variant=baseline fixture={name} mode={args.mode}"
             ctxt = f"[DRY_RUN] variant=candidate fixture={name} mode={args.mode}"
 
@@ -915,6 +1088,7 @@ def main_argv(argv: Sequence[str]) -> int:
             write_output(out_root / "candidate", args.mode, name, ctxt)
 
             baseline_results[name] = {
+                "input": baseline_input_by_name.get(name, ""),
                 "output": btxt,
                 "error": None,
                 "flags": bflags,
@@ -922,6 +1096,7 @@ def main_argv(argv: Sequence[str]) -> int:
                 "usage": {},
             }
             candidate_results[name] = {
+                "input": candidate_input_by_name.get(name, ""),
                 "output": ctxt,
                 "error": None,
                 "flags": cflags,
@@ -933,7 +1108,7 @@ def main_argv(argv: Sequence[str]) -> int:
         diffs_dir.mkdir(parents=True, exist_ok=True)
 
         diff_index: Dict[str, Any] = {}
-        for name, _ in fixtures:
+        for name, _ in baseline_fixtures:
             a = baseline_results[name]["output"] or ""
             b = candidate_results[name]["output"] or ""
             d = unified_diff(
@@ -953,7 +1128,7 @@ def main_argv(argv: Sequence[str]) -> int:
             report_path = write_ab_report_html(
                 out_root=out_root,
                 mode=args.mode,
-                fixtures=[n for (n, _) in fixtures],
+                fixtures=[n for (n, _) in baseline_fixtures],
                 diff_index=diff_index,
             )
             manifest["abReportHtml"] = str(report_path.resolve())
@@ -981,7 +1156,7 @@ def main_argv(argv: Sequence[str]) -> int:
         "temperature": args.temperature,
         "maxOutputTokens": args.max_output_tokens,
         "fixturesDir": str(fixtures_dir),
-        "fixtures": [name for (name, _) in fixtures],
+        "fixtures": [p.stem for p in fixture_files],
         "gitHeadSha": git_sha,
     }
 
@@ -996,6 +1171,17 @@ def main_argv(argv: Sequence[str]) -> int:
         system_prompt = system_prompt_for_mode(bundle, args.mode)
         if args.system_override_file:
             system_prompt = _read_text_file(Path(args.system_override_file))
+
+        user_template = user_template_for_mode(bundle, args.mode)
+        fixtures = [
+            (
+                p.stem,
+                render_fixture_user_prompt(
+                    p, mode=args.mode, user_template=user_template
+                ),
+            )
+            for p in fixture_files
+        ]
 
         manifest.update(
             {
@@ -1063,6 +1249,26 @@ def main_argv(argv: Sequence[str]) -> int:
     baseline_sp = system_prompt_for_mode(baseline_bundle, args.mode)
     candidate_sp = system_prompt_for_mode(candidate_bundle, args.mode)
 
+    baseline_ut = user_template_for_mode(baseline_bundle, args.mode)
+    candidate_ut = user_template_for_mode(candidate_bundle, args.mode)
+
+    baseline_fixtures = [
+        (
+            p.stem,
+            render_fixture_user_prompt(p, mode=args.mode, user_template=baseline_ut),
+        )
+        for p in fixture_files
+    ]
+    candidate_fixtures = [
+        (
+            p.stem,
+            render_fixture_user_prompt(p, mode=args.mode, user_template=candidate_ut),
+        )
+        for p in fixture_files
+    ]
+
+    fixture_names = [n for (n, _) in baseline_fixtures]
+
     if args.system_override_file:
         # If you override, it applies to BOTH (useful for quick experiments).
         override = _read_text_file(Path(args.system_override_file))
@@ -1094,7 +1300,7 @@ def main_argv(argv: Sequence[str]) -> int:
         temperature=args.temperature,
         max_output_tokens=args.max_output_tokens,
         system_prompt=baseline_sp,
-        fixtures=fixtures,
+        fixtures=baseline_fixtures,
         out_root=out_root,
         variant="baseline",
     )
@@ -1104,7 +1310,7 @@ def main_argv(argv: Sequence[str]) -> int:
         temperature=args.temperature,
         max_output_tokens=args.max_output_tokens,
         system_prompt=candidate_sp,
-        fixtures=fixtures,
+        fixtures=candidate_fixtures,
         out_root=out_root,
         variant="candidate",
     )
@@ -1113,7 +1319,7 @@ def main_argv(argv: Sequence[str]) -> int:
     diffs_dir.mkdir(parents=True, exist_ok=True)
 
     diff_index: Dict[str, Any] = {}
-    for name, _ in fixtures:
+    for name in fixture_names:
         a = baseline_results[name]["output"] or ""
         b = candidate_results[name]["output"] or ""
         d = unified_diff(a, b, a_label=f"baseline/{name}", b_label=f"candidate/{name}")
@@ -1130,7 +1336,7 @@ def main_argv(argv: Sequence[str]) -> int:
         report_path = write_ab_report_html(
             out_root=out_root,
             mode=args.mode,
-            fixtures=[n for (n, _) in fixtures],
+            fixtures=fixture_names,
             diff_index=diff_index,
         )
         manifest["abReportHtml"] = str(report_path.resolve())
@@ -1146,7 +1352,7 @@ def main_argv(argv: Sequence[str]) -> int:
     if manifest.get("abReportHtml"):
         print(f"ReportHtml={manifest['abReportHtml']}")
 
-    for name in [n for (n, _) in fixtures]:
+    for name in fixture_names:
         b = baseline_results[name]
         c = candidate_results[name]
         bflags = b["flags"]
@@ -1158,10 +1364,10 @@ def main_argv(argv: Sequence[str]) -> int:
             f" candFlags={','.join(cflags) if cflags else '-'}"
         )
 
-        inp = fixture_input_by_name.get(name, "")
+        inp = c.get("input") or ""
         if inp:
-            print("  INPUT:")
-            print("  " + "\n  ".join(inp.splitlines()))
+            print("  INPUT (candidate rendered):")
+            print("  " + "\n  ".join(str(inp).splitlines()))
 
         bout = b.get("output") or (
             "[ERROR] " + b.get("error") if b.get("error") else ""

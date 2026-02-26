@@ -169,6 +169,28 @@
 
     <div style="height:12px"></div>
 
+    <div class="grid3">
+      <div>
+        <label>Fixture</label>
+        <select id="fixtureSelect"></select>
+        <div class="muted">Pick one fixture, or run all.</div>
+      </div>
+      <div>
+        <label>Max fixtures</label>
+        <input id="maxFixturesInput" type="number" min="0" value="0" />
+        <div class="muted">0 = all</div>
+      </div>
+      <div>
+        <label>Suite (A/B)</label>
+        <div class="row">
+          <button id="runSuiteBtn">Run suite</button>
+          <span id="status" class="muted"></span>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
     <div class="grid2">
       <div>
         <label>System prompt (saved locally per app)</label>
@@ -176,8 +198,8 @@
         </div>
       </div>
       <div>
-        <label>User prompt</label>
-        <div class="muted">Run the system + user prompt against the API and see output, tokens, and cost.</div>
+        <label>User prompt template (saved locally per app)</label>
+        <div class="muted">Used to render structured .json fixtures for the selected mode.</div>
       </div>
     </div>
 
@@ -189,17 +211,37 @@
         <textarea id="systemPrompt" placeholder="System prompt"></textarea>
       </div>
       <div>
-        <label>User prompt</label>
-        <textarea id="userPrompt" placeholder="Write a user message here..."></textarea>
+        <label>User prompt template (for selected mode)</label>
+        <textarea id="userTemplate" placeholder="User prompt template"></textarea>
       </div>
     </div>
 
     <div style="height:12px"></div>
 
-    <div>
-      <label>User prompt template (for selected mode)</label>
-      <div class="muted">Edits are saved to tools/workbench-web/state/candidates/&lt;appId&gt;.json (gitignored).</div>
-      <textarea id="userTemplate" placeholder="User prompt template"></textarea>
+    <div class="card">
+      <div class="row" style="align-items:center;">
+        <div style="flex:1;"><strong>Preview (composed for selected fixture)</strong></div>
+        <div id="previewStatus" class="muted"></div>
+      </div>
+      <div style="height:10px"></div>
+      <div class="grid2">
+        <div>
+          <div class="muted"><strong>Baseline</strong></div>
+          <div class="muted">System</div>
+          <pre id="baselinePreviewSystem"></pre>
+          <div class="muted">User</div>
+          <pre id="baselinePreviewUser"></pre>
+        </div>
+        <div>
+          <div class="muted"><strong>Candidate</strong></div>
+          <div class="muted">System</div>
+          <pre id="candidatePreviewSystem"></pre>
+          <div class="muted">User</div>
+          <pre id="candidatePreviewUser"></pre>
+        </div>
+      </div>
+      <div class="muted" style="margin-top:8px;">Select a single fixture above to enable preview. “All fixtures” preview
+        is shown in the suite results.</div>
     </div>
 
     <div style="height:12px"></div>
@@ -236,10 +278,19 @@
 
     <div style="height:12px"></div>
 
-    <div class="row">
-      <button id="runTuneBtn">Run</button>
-      <span id="status" class="muted"></span>
-    </div>
+    <details class="card" style="padding:12px; border-color:#eee;">
+      <summary style="cursor:pointer;">Advanced (ad-hoc tune run)</summary>
+      <div style="height:10px"></div>
+      <div class="muted">Runs the current system prompt + a hand-written user message (not fixtures).</div>
+      <div style="height:10px"></div>
+      <label>User prompt</label>
+      <textarea id="userPrompt" placeholder="Write a user message here..."></textarea>
+      <div style="height:10px"></div>
+      <div class="row">
+        <button class="secondary" id="runTuneBtn" type="button">Run tune</button>
+        <span id="tuneStatus" class="muted"></span>
+      </div>
+    </details>
   </div>
 
   <div style="height:14px"></div>
@@ -458,6 +509,7 @@
 
       modeSelect.addEventListener('change', () => {
         if (currentCandidate) syncFieldsFromCandidate(currentCandidate);
+        loadFixtures().catch(() => { });
       });
 
       const modelSelect = document.getElementById('modelSelect');
@@ -467,10 +519,102 @@
 
       const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
       syncFieldsFromCandidate(cand);
+
+      await loadFixtures();
+      schedulePreview();
+    }
+
+    async function loadFixtures() {
+      const appId = document.getElementById('appSelect').value;
+      const mode = document.getElementById('modeSelect').value;
+      const res = await (await api('/api/fixtures?appId=' + encodeURIComponent(appId) + '&mode=' + encodeURIComponent(mode))).json();
+      const sel = document.getElementById('fixtureSelect');
+      sel.innerHTML = '';
+
+      const optAll = document.createElement('option');
+      optAll.value = '';
+      optAll.textContent = 'All fixtures';
+      sel.appendChild(optAll);
+
+      for (const fx of (res.fixtures || [])) {
+        const opt = document.createElement('option');
+        opt.value = fx.name || '';
+        opt.textContent = fx.name + (fx.kind ? ` (${fx.kind})` : '');
+        sel.appendChild(opt);
+      }
+
+      sel.onchange = () => schedulePreview();
+    }
+
+    let previewTimer = null;
+    function schedulePreview() {
+      if (previewTimer) clearTimeout(previewTimer);
+      previewTimer = setTimeout(() => updatePreview().catch(() => { }), 200);
+    }
+
+    function setPreviewText(id, text) {
+      document.getElementById(id).textContent = text || '';
+    }
+
+    async function updatePreview() {
+      const status = document.getElementById('previewStatus');
+
+      const fixture = (document.getElementById('fixtureSelect').value || '').trim();
+      if (!fixture) {
+        status.textContent = 'Select a fixture to preview.';
+        setPreviewText('baselinePreviewSystem', '');
+        setPreviewText('baselinePreviewUser', '');
+        setPreviewText('candidatePreviewSystem', '');
+        setPreviewText('candidatePreviewUser', '');
+        return;
+      }
+
+      status.textContent = 'Rendering…';
+
+      const appId = document.getElementById('appSelect').value;
+      const mode = document.getElementById('modeSelect').value;
+      const systemPrompt = document.getElementById('systemPrompt').value || '';
+      const userTemplate = document.getElementById('userTemplate').value || '';
+
+      const payload = { appId, mode, fixture, systemPrompt, userTemplate };
+      const res = await (await api('/api/compose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })).json();
+
+      setPreviewText('baselinePreviewSystem', res?.baseline?.system || '');
+      setPreviewText('baselinePreviewUser', res?.baseline?.user || '');
+      setPreviewText('candidatePreviewSystem', res?.candidate?.system || '');
+      setPreviewText('candidatePreviewUser', res?.candidate?.user || '');
+
+      status.textContent = `OK: ${res?.fixture?.name || fixture}`;
+    }
+
+    async function runSuite() {
+      const status = document.getElementById('status');
+      status.textContent = 'Running suite…';
+
+      const appId = document.getElementById('appSelect').value;
+      const mode = document.getElementById('modeSelect').value;
+      const model = document.getElementById('modelSelect').value;
+      const dryRun = !!document.getElementById('dryRun').checked;
+      const maxFixtures = parseInt(document.getElementById('maxFixturesInput').value, 10) || 0;
+      const fixture = (document.getElementById('fixtureSelect').value || '').trim();
+
+      // Ensure updatedAt is set and sync JSON from field editor.
+      document.getElementById('updatedAtInput').value = nowUtcIso();
+      const candidateObj = syncJsonFromFields();
+      const candidateJson = JSON.stringify(candidateObj);
+      await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: candidateJson });
+
+      const payload = { appId, mode, model, dryRun, maxFixtures, baselineSource: 'local_file' };
+      if (fixture) payload.fixture = fixture;
+
+      const run = await (await api('/api/run/ab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })).json();
+
+      status.textContent = 'Done';
+      renderSuiteResults(run);
     }
 
     async function runTune() {
-      const status = document.getElementById('status');
+      const status = document.getElementById('tuneStatus');
       status.textContent = 'Running…';
 
       const appId = document.getElementById('appSelect').value;
@@ -491,6 +635,63 @@
 
       status.textContent = 'Done';
       renderResults(run);
+    }
+
+    function renderSuiteResults(run) {
+      const root = document.getElementById('results');
+
+      const reportPath = run.reportPath || '';
+      const reportLink = reportPath ? `<a href="${esc(reportPath)}" target="_blank" rel="noreferrer">ab_report.html</a>` : '';
+
+      const items = run.items || [];
+      const totals = run.totals || {};
+
+      const totalsLine = `Tokens (totals) — baseline in/out/total/cached: ${esc(String(totals.baselineInputTokens ?? 0))} / ${esc(String(totals.baselineOutputTokens ?? 0))} / ${esc(String(totals.baselineTotalTokens ?? 0))} / ${esc(String(totals.baselineCachedTokens ?? 0))}<br/>` +
+        `candidate in/out/total/cached: ${esc(String(totals.candidateInputTokens ?? 0))} / ${esc(String(totals.candidateOutputTokens ?? 0))} / ${esc(String(totals.candidateTotalTokens ?? 0))} / ${esc(String(totals.candidateCachedTokens ?? 0))}`;
+
+      let html = `
+        <div class="muted">Report: ${reportLink || '(not available)'}<br/>${totalsLine}</div>
+        <div style="height:10px"></div>
+      `;
+
+      for (const it of items) {
+        const name = it.fixture || '';
+        const binp = it.baselineInput || '';
+        const cinp = it.candidateInput || '';
+        const bout = it.baselineOutput || '';
+        const cout = it.candidateOutput || '';
+
+        html += `
+          <details class="card" style="padding:12px; border-color:#eee;">
+            <summary style="cursor:pointer;"><strong>${esc(name)}</strong></summary>
+            <div style="height:10px"></div>
+            <div class="grid2">
+              <div>
+                <div class="muted"><strong>Baseline input</strong></div>
+                <pre>${esc(binp)}</pre>
+              </div>
+              <div>
+                <div class="muted"><strong>Candidate input</strong></div>
+                <pre>${esc(cinp)}</pre>
+              </div>
+            </div>
+            <div style="height:10px"></div>
+            <div class="grid2">
+              <div>
+                <div class="muted"><strong>Baseline output</strong></div>
+                <pre>${esc(bout)}</pre>
+              </div>
+              <div>
+                <div class="muted"><strong>Candidate output</strong></div>
+                <pre>${esc(cout)}</pre>
+              </div>
+            </div>
+          </details>
+          <div style="height:10px"></div>
+        `;
+      }
+
+      root.innerHTML = html;
     }
 
     function renderResults(run) {
@@ -523,9 +724,16 @@
       syncFieldsFromJson();
     });
 
-    document.getElementById('runTuneBtn').addEventListener('click', () => runTune().catch(e => {
+    document.getElementById('runSuiteBtn').addEventListener('click', () => runSuite().catch(e => {
       document.getElementById('status').textContent = 'Error: ' + e.message;
     }));
+
+    document.getElementById('runTuneBtn').addEventListener('click', () => runTune().catch(e => {
+      document.getElementById('tuneStatus').textContent = 'Error: ' + e.message;
+    }));
+
+    document.getElementById('systemPrompt').addEventListener('input', () => schedulePreview());
+    document.getElementById('userTemplate').addEventListener('input', () => schedulePreview());
 
     loadApps().catch(e => {
       document.getElementById('status').textContent = 'Error: ' + e.message;

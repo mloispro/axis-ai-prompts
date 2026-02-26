@@ -2,6 +2,10 @@
 
 Local-only web UI for iterating on prompt content stored in this same repo.
 
+## Consumer model
+- The canonical prompts live in `prompts/<appId>.json` and are intended to be consumed by a **separate app** (e.g., an Android client that fetches the JSON from public GitHub).
+- This web workbench is a **local iteration tool** to edit candidates and run fixture-driven checks before you ship prompt changes.
+
 ## Quick start (Windows)
 1) Copy env file (gitignored):
 - `tools/workbench-web/.env.local.example` → `tools/workbench-web/.env.local`

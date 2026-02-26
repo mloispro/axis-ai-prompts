@@ -2,6 +2,8 @@
 
 This folder contains a Python CLI that calls OpenAI directly so you can iterate on prompts quickly without rebuilding the Android app.
 
+This repo is the canonical prompt bundle (`prompts/<appId>.json`). The Android app itself is a **separate consumer** that can fetch the JSON from public GitHub and inject runtime inputs.
+
 ## Setup (PowerShell)
 
 Set your API key in the environment (do not commit keys):

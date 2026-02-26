@@ -13,7 +13,7 @@ No secrets are stored. API key is read from OPENAI_API_KEY env var.
 
 Repo conventions
 - Prompt files: prompts/<app>.json
-- Fixtures: fixtures/<app>/<mode>/*.txt (preferred) OR fixtures/<mode>/*.txt (legacy)
+- Fixtures: fixtures/<app>/<mode>/*.{txt,json} (preferred) OR fixtures/<mode>/*.{txt,json} (legacy)
 - Outputs: out/<runId>/...
 
 JSON shape expected for RizzChatAI-style prompts:
@@ -23,7 +23,10 @@ JSON shape expected for RizzChatAI-style prompts:
   "prompts": {
      "openerSystem": "...",
      "appChatSystem": "...",
-     "regChatSystem": "..."
+         "regChatSystem": "...",
+         "openerUser": "...",   // optional (used with .json fixtures)
+         "appChatUser": "...",  // optional (used with .json fixtures)
+         "regChatUser": "..."   // optional (used with .json fixtures)
   }
 }
 
@@ -39,6 +42,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import time
 import urllib.error
 import urllib.request
@@ -99,6 +103,49 @@ def _prompt_for_mode(prompt_json: dict, mode: str) -> str:
     raise SystemExit(f"Unknown mode '{mode}'. Expected opener|app_chat|reg_chat")
 
 
+def _user_template_for_mode(prompt_json: dict, mode: str) -> str:
+    """Return the per-mode user prompt template, if present.
+
+    This is optional and is only used when fixtures are structured (.json).
+    Plain .txt fixtures are treated as already-rendered user prompts.
+    """
+
+    prompts = prompt_json.get("prompts") or {}
+    mode_key = mode.lower()
+    if mode_key == "opener":
+        return str(prompts.get("openerUser") or "")
+    if mode_key in ("app_chat", "app chat", "appchat"):
+        return str(prompts.get("appChatUser") or "")
+    if mode_key in ("reg_chat", "reg chat", "regchat"):
+        return str(prompts.get("regChatUser") or "")
+    return ""
+
+
+_TEMPLATE_VAR_RE = re.compile(r"\{\{([a-zA-Z0-9_]+)\}\}")
+
+
+def _collapse_blank_lines(s: str) -> str:
+    s = s.replace("\r\n", "\n")
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip() + "\n"
+
+
+def _render_template(template: str, template_vars: Dict[str, str]) -> str:
+    def repl(m: re.Match) -> str:
+        key = m.group(1)
+        return str(template_vars.get(key, ""))
+
+    rendered = _TEMPLATE_VAR_RE.sub(repl, template)
+    return _collapse_blank_lines(rendered)
+
+
+def _tie_in_block(tie_in: str) -> str:
+    cleaned = (tie_in or "").strip()
+    if not cleaned:
+        return ""
+    return f"Naturally work in this topic if possible: {cleaned}"
+
+
 def _mode_key(mode: str) -> str:
     return mode.lower().strip().replace(" ", "_")
 
@@ -107,10 +154,10 @@ def _fixture_dirs_for_mode(mode: str, app: Optional[str]) -> List[pathlib.Path]:
     """Return fixture search dirs in priority order.
 
     Preferred layout is app-scoped:
-        fixtures/<app>/<mode>/*.txt
+        fixtures/<app>/<mode>/*.{txt,json}
 
     Legacy layout (still supported):
-        fixtures/<mode>/*.txt
+        fixtures/<mode>/*.{txt,json}
     """
 
     key = _mode_key(mode)
@@ -130,14 +177,20 @@ def _select_fixtures(
         searched.append(folder)
         if not folder.exists():
             continue
-        files = sorted([p for p in folder.glob("*.txt") if p.is_file()])
+        files = sorted(
+            [
+                p
+                for p in list(folder.glob("*.txt")) + list(folder.glob("*.json"))
+                if p.is_file()
+            ]
+        )
         if files:
             break
 
     if not files:
         searched_str = ", ".join(str(p) for p in searched)
         raise SystemExit(
-            f"No .txt fixtures found for mode '{mode}'. Searched: {searched_str}"
+            f"No fixtures found for mode '{mode}' (.txt or .json). Searched: {searched_str}"
         )
 
     if not only:
@@ -287,6 +340,9 @@ def cmd_run(args: argparse.Namespace) -> pathlib.Path:
             f"System prompt for mode '{args.mode}' is blank in {prompt_path.name}"
         )
 
+    user_template = _user_template_for_mode(prompt_json, args.mode)
+    uses_user_template = bool(user_template.strip())
+
     fixtures = _select_fixtures(args.mode, args.fixture, args.app)
 
     run_id = _utc_run_id()
@@ -310,6 +366,8 @@ def cmd_run(args: argparse.Namespace) -> pathlib.Path:
         "maxTokens": args.max_tokens,
         "promptFile": str(prompt_path).replace("\\", "/"),
         "systemPromptSha": _hash_text(system_prompt),
+        "usesUserTemplate": uses_user_template,
+        "userTemplateSha": _hash_text(user_template) if uses_user_template else None,
         "fixtures": [p.name for p in fixtures],
         "dryRun": bool(args.dry_run),
         "continueOnError": bool(args.continue_on_error),
@@ -319,7 +377,34 @@ def cmd_run(args: argparse.Namespace) -> pathlib.Path:
     print(f"Run: {run_id} -> {run_dir}")
 
     for fx in fixtures:
-        user_prompt = _read_text(fx)
+        if fx.suffix.lower() == ".txt":
+            # Back-compat: .txt fixtures are treated as already-rendered user prompts.
+            user_prompt = _read_text(fx)
+        elif fx.suffix.lower() == ".json":
+            payload = _load_json(fx)
+            if not isinstance(payload, dict):
+                raise SystemExit(f"Fixture JSON must be an object: {fx}")
+
+            # Optional escape hatch: allow explicit raw override for edge cases.
+            raw_override = payload.get("user_prompt")
+            if isinstance(raw_override, str) and raw_override.strip():
+                user_prompt = raw_override
+            else:
+                if not uses_user_template:
+                    raise SystemExit(
+                        f"No user template found for mode '{args.mode}', but fixture is .json: {fx.name}"
+                    )
+
+                tie_in = str(payload.get("tie_in") or "")
+                template_vars: Dict[str, str] = {
+                    "tie_in": tie_in,
+                    "tie_in_block": _tie_in_block(tie_in),
+                    "profile_text": str(payload.get("profile_text") or ""),
+                    "chat_transcript": str(payload.get("chat_transcript") or ""),
+                }
+                user_prompt = _render_template(user_template, template_vars)
+        else:
+            raise SystemExit(f"Unsupported fixture type: {fx.name}")
         if args.dry_run:
             content = "[DRY RUN]"
             error = None
@@ -571,7 +656,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     print("\nFixtures:")
     known_modes = {"opener", "app_chat", "reg_chat"}
 
-    # 1) App-scoped fixtures: fixtures/<app>/<mode>/*.txt
+    # 1) App-scoped fixtures: fixtures/<app>/<mode>/*.{txt,json}
     app_dirs = sorted(
         [p for p in FIXTURES_DIR.iterdir() if p.is_dir() and p.name not in known_modes]
     )
@@ -579,23 +664,23 @@ def cmd_list(args: argparse.Namespace) -> int:
         print("App-scoped:")
         for app_dir in app_dirs:
             for mode in sorted([p for p in app_dir.iterdir() if p.is_dir()]):
-                txts = sorted(mode.glob("*.txt"))
-                print(f"- {app_dir.name}/{mode.name} ({len(txts)} fixtures)")
+                fx = sorted(list(mode.glob("*.txt")) + list(mode.glob("*.json")))
+                print(f"- {app_dir.name}/{mode.name} ({len(fx)} fixtures)")
                 if args.verbose:
-                    for t in txts:
+                    for t in fx:
                         print(f"    - {t.name}")
 
-    # 2) Legacy fixtures: fixtures/<mode>/*.txt
+    # 2) Legacy fixtures: fixtures/<mode>/*.{txt,json}
     legacy_dirs = sorted(
         [FIXTURES_DIR / m for m in known_modes if (FIXTURES_DIR / m).is_dir()]
     )
     if legacy_dirs:
         print("Legacy:")
         for d in legacy_dirs:
-            txts = sorted(d.glob("*.txt"))
-            print(f"- {d.name} ({len(txts)} fixtures)")
+            fx = sorted(list(d.glob("*.txt")) + list(d.glob("*.json")))
+            print(f"- {d.name} ({len(fx)} fixtures)")
             if args.verbose:
-                for t in txts:
+                for t in fx:
                     print(f"    - {t.name}")
     return 0
 

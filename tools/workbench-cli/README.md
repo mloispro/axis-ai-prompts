@@ -37,7 +37,10 @@ Legacy layout is also supported:
 - `fixtures/app_chat/*.txt`
 - `fixtures/reg_chat/*.txt`
 
-Each fixture is the exact text sent as the **user** message.
+Each fixture is the input used to build the **user** message.
+
+- `.txt` fixtures: treated as the exact user message (backwards compatible)
+- `.json` fixtures: structured variables used to render the per-mode user template (e.g. `prompts.appChatUser`)
 
 ## Outputs
 

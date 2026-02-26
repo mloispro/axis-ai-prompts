@@ -196,6 +196,14 @@
 
     <div style="height:12px"></div>
 
+    <div>
+      <label>User prompt template (for selected mode)</label>
+      <div class="muted">Edits are saved to tools/workbench-web/state/candidates/&lt;appId&gt;.json (gitignored).</div>
+      <textarea id="userTemplate" placeholder="User prompt template"></textarea>
+    </div>
+
+    <div style="height:12px"></div>
+
     <details class="card" style="padding:12px; border-color:#eee;">
       <summary style="cursor:pointer;">Advanced (bundle JSON)</summary>
       <div style="height:10px"></div>
@@ -251,6 +259,12 @@
       reg_chat: 'regChatSystem',
     };
 
+    const MODE_TO_USER_TEMPLATE_KEY = {
+      opener: 'openerUser',
+      app_chat: 'appChatUser',
+      reg_chat: 'regChatUser',
+    };
+
     async function api(path, opts) {
       const res = await fetch(path, opts);
       if (!res.ok) {
@@ -285,6 +299,11 @@
       const key = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
       prompts[key] = document.getElementById('systemPrompt').value || '';
 
+      const userKey = MODE_TO_USER_TEMPLATE_KEY[mode];
+      if (userKey) {
+        prompts[userKey] = document.getElementById('userTemplate').value || '';
+      }
+
       const version = parseInt(document.getElementById('versionInput').value, 10) || (base.version ?? 1) || 1;
       const ttlSeconds = parseInt(document.getElementById('ttlSecondsInput').value, 10) || (base.ttlSeconds ?? 3600) || 3600;
       const updatedAt = (document.getElementById('updatedAtInput').value || '').trim() || (base.updatedAt ?? '') || nowUtcIso();
@@ -308,6 +327,9 @@
       const mode = document.getElementById('modeSelect').value;
       const key = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
       document.getElementById('systemPrompt').value = p[key] || '';
+
+      const userKey = MODE_TO_USER_TEMPLATE_KEY[mode];
+      document.getElementById('userTemplate').value = (userKey && p[userKey]) ? p[userKey] : '';
 
       document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
       document.getElementById('jsonError').textContent = '';

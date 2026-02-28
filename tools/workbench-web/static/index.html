@@ -246,6 +246,85 @@
 
     <div style="height:12px"></div>
 
+    <div class="card" id="aiEditorCard">
+      <div class="row" style="align-items:center;">
+        <div style="flex:1;"><strong>AI Prompt Editor (diff-first)</strong></div>
+        <div class="muted" style="display:flex; gap:10px; align-items:center;">
+          <a href="/api/logs?tail=200" target="_blank" rel="noopener" class="muted"
+            style="text-decoration:none;">Logs</a>
+          <span class="muted" title="Last server trace id">trace:</span>
+          <span id="lastTraceId" class="muted"
+            style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;"></span>
+          <span id="aiEditStatus" class="muted"></span>
+        </div>
+      </div>
+      <div style="height:10px"></div>
+      <div class="grid3">
+        <div>
+          <label>Target key</label>
+          <select id="aiTargetKey"></select>
+          <div class="muted">Edits one key in the candidate bundle.</div>
+        </div>
+        <div style="grid-column: span 2;">
+          <label>Change request</label>
+          <input id="aiChangeRequest" type="text" placeholder="E.g., make it warmer but keep it concise" />
+          <div class="muted">Uses selected model. Dry run produces a fake edit.</div>
+        </div>
+      </div>
+      <div style="height:10px"></div>
+      <div class="row">
+        <button id="aiProposeBtn" type="button">Propose edit</button>
+        <button class="secondary" id="aiApplyBtn" type="button" disabled>Apply</button>
+        <button class="ghost" id="aiUndoBtn" type="button">Undo</button>
+        <button class="ghost" id="aiResetBtn" type="button">Reset</button>
+      </div>
+      <div class="muted" style="margin-top:8px;">Propose shows a diff. Apply writes into your local Candidate file. Undo
+        reverts the last Apply. Reset restores Candidate back to the repo prompts file.</div>
+      <div id="aiAppliedInfo" class="muted" style="margin-top:8px;"></div>
+      <div id="aiError" class="err" style="margin-top:8px;"></div>
+
+      <div style="height:12px"></div>
+
+      <div class="grid3">
+        <div>
+          <label>Edit history</label>
+          <select id="draftSelect"></select>
+          <div id="draftMeta" class="muted"></div>
+        </div>
+        <div>
+          <label>History actions</label>
+          <div class="row" style="align-items:center;">
+            <button class="ghost" id="draftRefreshBtn" type="button">Refresh</button>
+            <button class="secondary" id="draftRestoreBtn" type="button" disabled>Restore snapshot</button>
+          </div>
+          <div class="muted">Restore loads the selected snapshot back into your local “Candidate” prompts.</div>
+        </div>
+        <div>
+          <label>Publish</label>
+          <div class="row" style="align-items:center;">
+            <button id="promoteBtn" type="button" disabled>Publish to repo prompts</button>
+            <span id="promoteStatus" class="muted"></span>
+          </div>
+          <div class="muted">“Repo prompts” (canonical) = the tracked file under
+            <code>prompts/&lt;appId&gt;.json</code>. Requires latest suite run to be clean.</div>
+        </div>
+      </div>
+
+      <div style="height:10px"></div>
+      <div class="grid2">
+        <div>
+          <div class="muted"><strong>Diff</strong></div>
+          <pre id="aiDiff"></pre>
+        </div>
+        <div>
+          <div class="muted"><strong>Notes</strong></div>
+          <pre id="aiNotes"></pre>
+        </div>
+      </div>
+    </div>
+
+    <div style="height:12px"></div>
+
     <details class="card" style="padding:12px; border-color:#eee;">
       <summary style="cursor:pointer;">Advanced (bundle JSON)</summary>
       <div style="height:10px"></div>
@@ -303,6 +382,11 @@
   <script>
     let currentCandidate = null;
     let models = [];
+    let aiLastProposal = null;
+    let lastTraceId = '';
+    let draftVersions = [];
+    let latestSuite = null;
+    let latestSuiteIsClean = false;
 
     const MODE_TO_PROMPT_KEY = {
       opener: 'openerSystem',
@@ -318,9 +402,18 @@
 
     async function api(path, opts) {
       const res = await fetch(path, opts);
+      const trace = res.headers.get('X-Trace-Id') || '';
+      if (trace) {
+        lastTraceId = trace;
+        const el = document.getElementById('lastTraceId');
+        if (el) el.textContent = trace;
+      }
       if (!res.ok) {
         const t = await res.text();
-        throw new Error(t || ('HTTP ' + res.status));
+        const base = t || ('HTTP ' + res.status);
+        const suffix = (trace || lastTraceId) ? `\ntrace_id=${trace || lastTraceId}` : '';
+        const logs = `\nlogs=/api/logs?tail=200`;
+        throw new Error(base + suffix + logs);
       }
       return res;
     }
@@ -385,6 +478,375 @@
       document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
       document.getElementById('jsonError').textContent = '';
       document.getElementById('jsonStatus').textContent = '';
+
+      refreshAiTargetKeys();
+      clearAiProposal();
+    }
+
+    function clearAiProposal() {
+      aiLastProposal = null;
+      document.getElementById('aiDiff').textContent = '';
+      document.getElementById('aiNotes').textContent = '';
+      document.getElementById('aiError').textContent = '';
+      document.getElementById('aiApplyBtn').disabled = true;
+    }
+
+    function refreshAiTargetKeys() {
+      const sel = document.getElementById('aiTargetKey');
+      const prev = sel.value;
+
+      const keys = Object.keys((currentCandidate && currentCandidate.prompts) ? currentCandidate.prompts : {}).sort();
+      sel.innerHTML = '';
+      for (const k of keys) {
+        const opt = document.createElement('option');
+        opt.value = k;
+        opt.textContent = k;
+        sel.appendChild(opt);
+      }
+
+      const mode = document.getElementById('modeSelect').value;
+      const defaultKey = MODE_TO_PROMPT_KEY[mode] || (keys[0] || '');
+
+      if (prev && keys.includes(prev)) {
+        sel.value = prev;
+      } else if (defaultKey && keys.includes(defaultKey)) {
+        sel.value = defaultKey;
+      } else if (keys.length) {
+        sel.value = keys[0];
+      }
+    }
+
+    function aiNotesFromProposal(p) {
+      if (!p || typeof p !== 'object') return '';
+      const lines = [];
+      if (typeof p.status === 'string') lines.push('status: ' + p.status);
+      if (typeof p.selfCheck === 'boolean') lines.push('selfCheck: ' + String(p.selfCheck));
+      if (typeof p.rationale === 'string' && p.rationale.trim()) {
+        lines.push('\nRationale:\n' + p.rationale.trim());
+      }
+      const warnings = Array.isArray(p.warnings) ? p.warnings : [];
+      if (warnings.length) {
+        lines.push('\nWarnings:\n- ' + warnings.map(w => String(w)).join('\n- '));
+      }
+      if (typeof p.refusalReason === 'string' && p.refusalReason.trim()) {
+        lines.push('\nRefusal:\n' + p.refusalReason.trim());
+      }
+      return lines.join('\n');
+    }
+
+    function setAiAppliedInfo(text) {
+      const el = document.getElementById('aiAppliedInfo');
+      if (!el) return;
+      el.textContent = text || '';
+    }
+
+    function setPromoteStatus(text) {
+      const el = document.getElementById('promoteStatus');
+      if (!el) return;
+      el.textContent = text || '';
+    }
+
+    function suiteLine(suite) {
+      if (!suite || typeof suite !== 'object') return '';
+      const runId = suite.runId ? String(suite.runId) : '';
+      const ranAt = suite.ranAt ? String(suite.ranAt) : '';
+      const isClean = suite.isClean === true;
+      const tag = isClean ? 'clean' : 'not clean';
+      const bits = [];
+      if (runId) bits.push('runId=' + runId);
+      if (ranAt) bits.push('at=' + ranAt);
+      bits.push(tag);
+      return bits.join(' | ');
+    }
+
+    async function refreshDrafts() {
+      const appId = document.getElementById('appSelect').value;
+      const sel = document.getElementById('draftSelect');
+      const meta = document.getElementById('draftMeta');
+      const restoreBtn = document.getElementById('draftRestoreBtn');
+      const promoteBtn = document.getElementById('promoteBtn');
+
+      if (!sel || !meta || !restoreBtn || !promoteBtn) return;
+
+      const prevSelectedId = (sel && sel.value) ? String(sel.value) : '';
+
+      document.getElementById('aiError').textContent = '';
+      const res = await (await api('/api/drafts?appId=' + encodeURIComponent(appId))).json();
+      draftVersions = res.versions || [];
+      latestSuite = res.latestSuite || null;
+      latestSuiteIsClean = res.latestSuiteIsClean === true;
+
+      sel.innerHTML = '';
+      const opt0 = document.createElement('option');
+      opt0.value = '';
+      opt0.textContent = draftVersions.length ? 'Select an edit…' : 'No edits yet';
+      sel.appendChild(opt0);
+
+      for (const v of draftVersions) {
+        const opt = document.createElement('option');
+        opt.value = v.id || '';
+        const when = v.savedAt ? String(v.savedAt) : '';
+        const reason = v.reason ? String(v.reason) : '';
+        const key = v.targetKey ? String(v.targetKey) : '';
+        const label = reason.startsWith('apply:')
+          ? `Edited ${key || reason.replace(/^apply:/, '')}`
+          : reason;
+        opt.textContent = `${when} — ${label}`;
+        sel.appendChild(opt);
+      }
+
+      if (latestSuite && typeof latestSuite === 'object') {
+        const suiteBits = [];
+        if (latestSuite.runId) suiteBits.push('runId=' + String(latestSuite.runId));
+        if (latestSuite.ranAt) suiteBits.push('at=' + String(latestSuite.ranAt));
+        meta.textContent = `latest suite: ${latestSuiteIsClean ? 'clean' : 'not clean'}${suiteBits.length ? ' (' + suiteBits.join(' | ') + ')' : ''}`;
+      } else {
+        meta.textContent = 'latest suite: (none yet)';
+      }
+      restoreBtn.disabled = true;
+      promoteBtn.disabled = !latestSuiteIsClean;
+      setPromoteStatus('');
+
+      // Populate Diff/Notes on launch by auto-selecting a draft.
+      // Preference order: preserve prior selection → newest.
+      const stillExists = prevSelectedId && draftVersions.some(v => v && v.id === prevSelectedId);
+      const toSelect = stillExists
+        ? prevSelectedId
+        : (draftVersions[0] ? String(draftVersions[0].id || '') : '');
+
+      const canSelect = toSelect && draftVersions.some(v => v && v.id === toSelect);
+      if (canSelect) {
+        sel.value = toSelect;
+        await onDraftSelected();
+      }
+    }
+
+    async function onDraftSelected() {
+      const appId = document.getElementById('appSelect').value;
+      const sel = document.getElementById('draftSelect');
+      const restoreBtn = document.getElementById('draftRestoreBtn');
+      const id = (sel && sel.value) ? String(sel.value) : '';
+      restoreBtn.disabled = !id;
+      document.getElementById('aiError').textContent = '';
+      if (!id) {
+        document.getElementById('aiDiff').textContent = '';
+        document.getElementById('aiNotes').textContent = 'No edit snapshot selected.';
+        return;
+      }
+
+      const targetKey = document.getElementById('aiTargetKey').value;
+      if (!targetKey) return;
+
+      try {
+        const d = await (await api('/api/drafts/diff?appId=' + encodeURIComponent(appId) + '&id=' + encodeURIComponent(id) + '&targetKey=' + encodeURIComponent(targetKey))).json();
+        document.getElementById('aiDiff').textContent = d.diff || '';
+
+        const ver = (draftVersions || []).find(x => x && x.id === id) || null;
+        const notes = [];
+        notes.push('Edit snapshot (saved after Apply).');
+        notes.push('Use Restore snapshot to load it back into Candidate.');
+        notes.push('');
+        notes.push(`id=${id}`);
+        if (ver && ver.reason) notes.push(`reason=${String(ver.reason)}`);
+        if (ver && ver.targetKey) notes.push(`targetKey=${String(ver.targetKey)}`);
+        if (ver && ver.model) notes.push(`model=${String(ver.model)}`);
+        if (ver && ver.traceId) notes.push(`traceId=${String(ver.traceId)}`);
+        if (ver && ver.suite) notes.push('suite: ' + suiteLine(ver.suite));
+        if (ver && ver.notes) {
+          notes.push('');
+          notes.push(String(ver.notes));
+        }
+        document.getElementById('aiNotes').textContent = notes.join('\n');
+      } catch (e) {
+        document.getElementById('aiError').textContent = e.message || String(e);
+      }
+    }
+
+    async function restoreDraft() {
+      const sel = document.getElementById('draftSelect');
+      const id = (sel && sel.value) ? String(sel.value) : '';
+      if (!id) return;
+      if (!confirm('Restore this snapshot into your local Candidate prompts?')) return;
+
+      const appId = document.getElementById('appSelect').value;
+      await api('/api/drafts/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId, id }),
+      });
+
+      const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
+      syncFieldsFromCandidate(cand);
+      schedulePreview();
+      await refreshDrafts();
+      document.getElementById('aiEditStatus').textContent = 'Restored snapshot';
+    }
+
+    async function promoteToCanonical() {
+      if (!confirm('Publish Candidate → repo prompts file (prompts/<appId>.json) and clear local history?')) return;
+
+      const appId = document.getElementById('appSelect').value;
+      setPromoteStatus('Promoting…');
+      await api('/api/promote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId, requireClean: true }),
+      });
+
+      const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
+      syncFieldsFromCandidate(cand);
+      schedulePreview();
+      await refreshDrafts();
+      setPromoteStatus('Done');
+    }
+
+    async function aiPropose() {
+      clearAiProposal();
+      setAiAppliedInfo('');
+      const status = document.getElementById('aiEditStatus');
+      status.textContent = 'Proposing…';
+
+      const appId = document.getElementById('appSelect').value;
+      const model = document.getElementById('modelSelect').value;
+      const dryRun = !!document.getElementById('dryRun').checked;
+      const targetKey = document.getElementById('aiTargetKey').value;
+      const changeRequest = (document.getElementById('aiChangeRequest').value || '').trim();
+
+      if (!targetKey) {
+        document.getElementById('aiError').textContent = 'Pick a target key.';
+        status.textContent = '';
+        return;
+      }
+      if (!changeRequest) {
+        document.getElementById('aiError').textContent = 'Enter a change request.';
+        status.textContent = '';
+        return;
+      }
+
+      // Persist current editor fields so server reads the latest candidate text.
+      document.getElementById('updatedAtInput').value = nowUtcIso();
+      const candidateObj = syncJsonFromFields();
+      await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId), {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(candidateObj),
+      });
+
+      const payload = { appId, model, dryRun, targetKey, changeRequest };
+      const res = await (await api('/api/edit/propose', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })).json();
+
+      const proposal = res.proposal;
+      aiLastProposal = proposal;
+
+      document.getElementById('aiDiff').textContent = res.diff || '';
+      document.getElementById('aiNotes').textContent = aiNotesFromProposal(proposal);
+
+      const ok = proposal && proposal.status === 'ok' && proposal.selfCheck === true;
+      document.getElementById('aiApplyBtn').disabled = !ok;
+
+      if (!ok) {
+        const refusal = (proposal && typeof proposal.refusalReason === 'string') ? proposal.refusalReason.trim() : '';
+        if (refusal) document.getElementById('aiError').textContent = refusal;
+      }
+
+      status.textContent = ok ? 'OK' : 'Not applyable';
+    }
+
+    async function aiApply() {
+      const status = document.getElementById('aiEditStatus');
+      const proposal = aiLastProposal;
+      if (!proposal || proposal.status !== 'ok' || proposal.selfCheck !== true) {
+        document.getElementById('aiError').textContent = 'No applyable proposal.';
+        return;
+      }
+
+      status.textContent = 'Applying…';
+      document.getElementById('aiError').textContent = '';
+
+      const appId = document.getElementById('appSelect').value;
+      const model = document.getElementById('modelSelect').value;
+      const payload = {
+        appId,
+        model,
+        changeRequest: (document.getElementById('aiChangeRequest').value || '').trim(),
+        notes: aiNotesFromProposal(proposal),
+        targetKey: proposal.targetKey,
+        updatedText: proposal.updatedText,
+        selfCheck: proposal.selfCheck,
+      };
+
+      const applyRes = await (await api('/api/edit/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })).json();
+
+      const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
+      syncFieldsFromCandidate(cand);
+
+      const stored = (cand && cand.prompts && typeof cand.prompts === 'object') ? cand.prompts[proposal.targetKey] : null;
+      const verified = (typeof stored === 'string') && (stored === proposal.updatedText);
+
+      const mode = document.getElementById('modeSelect').value;
+      const visibleSystemKey = MODE_TO_PROMPT_KEY[mode];
+      const visibleUserKey = MODE_TO_USER_TEMPLATE_KEY[mode];
+      const visibleHint = (proposal.targetKey === visibleSystemKey || proposal.targetKey === visibleUserKey)
+        ? ''
+        : ` (note: this key is not shown in the current mode editor)`;
+
+      const when = (applyRes && typeof applyRes.updatedAt === 'string' && applyRes.updatedAt) ? applyRes.updatedAt : (cand && cand.updatedAt ? String(cand.updatedAt) : '');
+      const trace = (applyRes && typeof applyRes.traceId === 'string' && applyRes.traceId) ? applyRes.traceId : (lastTraceId || '');
+      const tracePart = trace ? ` | trace_id=${trace}` : '';
+      const whenPart = when ? ` at ${when}` : '';
+      setAiAppliedInfo(`Applied ${proposal.targetKey}${whenPart}${tracePart} — ${verified ? 'VERIFIED' : 'NOT VERIFIED'}${visibleHint}`);
+
+      clearAiProposal();
+      schedulePreview();
+
+      // Auto-run the suite to validate the change (dry-run aware).
+      status.textContent = 'Applied; running suite…';
+      await runSuite();
+      status.textContent = 'Applied + suite done';
+      await refreshDrafts();
+    }
+
+    async function aiUndo() {
+      clearAiProposal();
+      const status = document.getElementById('aiEditStatus');
+      status.textContent = 'Undoing…';
+      const appId = document.getElementById('appSelect').value;
+      await api('/api/edit/undo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId }),
+      });
+      const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
+      syncFieldsFromCandidate(cand);
+      schedulePreview();
+      status.textContent = 'Undone';
+      await refreshDrafts();
+    }
+
+    async function aiReset() {
+      if (!confirm('Reset candidate prompts back to canonical?')) return;
+      clearAiProposal();
+      const status = document.getElementById('aiEditStatus');
+      status.textContent = 'Resetting…';
+      const appId = document.getElementById('appSelect').value;
+      await api('/api/edit/reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appId }),
+      });
+      const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
+      syncFieldsFromCandidate(cand);
+      schedulePreview();
+      status.textContent = 'Reset';
+      await refreshDrafts();
     }
 
     function syncJsonFromFields() {
@@ -513,7 +975,7 @@
       });
 
       const modelSelect = document.getElementById('modelSelect');
-      const desired = (cfg.defaultModel || 'gpt-4o-mini').trim();
+      const desired = (cfg.defaultModel || 'gpt-5-mini').trim();
       const has = [...modelSelect.options].some(o => o.value === desired);
       modelSelect.value = has ? desired : (modelSelect.options[0]?.value || desired);
 
@@ -522,6 +984,7 @@
 
       await loadFixtures();
       schedulePreview();
+      await refreshDrafts();
     }
 
     async function loadFixtures() {
@@ -611,6 +1074,7 @@
 
       status.textContent = 'Done';
       renderSuiteResults(run);
+      await refreshDrafts();
     }
 
     async function runTune() {
@@ -660,6 +1124,10 @@
         const cinp = it.candidateInput || '';
         const bout = it.baselineOutput || '';
         const cout = it.candidateOutput || '';
+        const bflags = Array.isArray(it.baselineFlags) ? it.baselineFlags.join(',') : '';
+        const cflags = Array.isArray(it.candidateFlags) ? it.candidateFlags.join(',') : '';
+        const berr = it.baselineError || '';
+        const cerr = it.candidateError || '';
 
         html += `
           <details class="card" style="padding:12px; border-color:#eee;">
@@ -679,10 +1147,12 @@
             <div class="grid2">
               <div>
                 <div class="muted"><strong>Baseline output</strong></div>
+                <div class="muted">flags: ${esc(bflags || '(none)')}${berr ? ` | error: ${esc(berr)}` : ''}</div>
                 <pre>${esc(bout)}</pre>
               </div>
               <div>
                 <div class="muted"><strong>Candidate output</strong></div>
+                <div class="muted">flags: ${esc(cflags || '(none)')}${cerr ? ` | error: ${esc(cerr)}` : ''}</div>
                 <pre>${esc(cout)}</pre>
               </div>
             </div>
@@ -734,6 +1204,47 @@
 
     document.getElementById('systemPrompt').addEventListener('input', () => schedulePreview());
     document.getElementById('userTemplate').addEventListener('input', () => schedulePreview());
+
+    document.getElementById('aiProposeBtn').addEventListener('click', () => aiPropose().catch(e => {
+      document.getElementById('aiEditStatus').textContent = 'Error';
+      document.getElementById('aiError').textContent = e.message;
+    }));
+    document.getElementById('aiApplyBtn').addEventListener('click', () => aiApply().catch(e => {
+      document.getElementById('aiEditStatus').textContent = 'Error';
+      document.getElementById('aiError').textContent = e.message;
+    }));
+    document.getElementById('aiUndoBtn').addEventListener('click', () => aiUndo().catch(e => {
+      document.getElementById('aiEditStatus').textContent = 'Error';
+      document.getElementById('aiError').textContent = e.message;
+    }));
+    document.getElementById('aiResetBtn').addEventListener('click', () => aiReset().catch(e => {
+      document.getElementById('aiEditStatus').textContent = 'Error';
+      document.getElementById('aiError').textContent = e.message;
+    }));
+
+    document.getElementById('aiTargetKey').addEventListener('change', () => {
+      clearAiProposal();
+      onDraftSelected().catch(e => {
+        document.getElementById('aiError').textContent = e.message;
+      });
+    });
+    document.getElementById('draftSelect').addEventListener('change', () => onDraftSelected().catch(e => {
+      document.getElementById('aiError').textContent = e.message;
+    }));
+    document.getElementById('draftRefreshBtn').addEventListener('click', () => refreshDrafts().catch(e => {
+      document.getElementById('aiError').textContent = e.message;
+    }));
+    document.getElementById('draftRestoreBtn').addEventListener('click', () => restoreDraft().catch(e => {
+      document.getElementById('aiError').textContent = e.message;
+    }));
+    document.getElementById('promoteBtn').addEventListener('click', () => promoteToCanonical().catch(e => {
+      setPromoteStatus('Error');
+      document.getElementById('aiError').textContent = e.message;
+    }));
+    document.getElementById('aiChangeRequest').addEventListener('input', () => {
+      // If user changes the request, old proposal is stale.
+      document.getElementById('aiApplyBtn').disabled = true;
+    });
 
     loadApps().catch(e => {
       document.getElementById('status').textContent = 'Error: ' + e.message;

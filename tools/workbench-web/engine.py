@@ -40,6 +40,7 @@ import datetime
 import difflib
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -51,6 +52,13 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 
 MODES = ("opener", "app_chat", "reg_chat")
+
+
+_LOG = logging.getLogger("workbench.engine")
+if not _LOG.handlers:
+    # Leave handler configuration to the hosting app (FastAPI server). When this
+    # module is used standalone, avoid "No handler" warnings.
+    _LOG.addHandler(logging.NullHandler())
 
 
 @dataclasses.dataclass(frozen=True)
@@ -225,6 +233,400 @@ def user_template_for_mode(bundle: PromptBundle, mode: str) -> str:
 
 
 _TEMPLATE_VAR_RE = re.compile(r"\{\{([a-zA-Z0-9_]+)\}\}")
+
+
+def extract_template_vars(text: str) -> List[str]:
+    """Return template variable names referenced like {{var}}."""
+
+    t = text or ""
+    return sorted(set(_TEMPLATE_VAR_RE.findall(t)))
+
+
+_URL_RE = re.compile(r"\bhttps?://", re.IGNORECASE)
+
+
+def validate_prompt_edit(
+    *, target_key: str, current_text: str, updated_text: str
+) -> List[str]:
+    """Validate a proposed prompt edit.
+
+    Rules (enforced):
+    - Must preserve placeholder set exactly (no adds/removes).
+    - Must not introduce external URLs.
+    - Must not be empty/whitespace.
+    """
+
+    errors: List[str] = []
+
+    if not isinstance(updated_text, str):
+        errors.append("updatedText must be a string")
+        return errors
+
+    if not updated_text.strip():
+        errors.append("updatedText must not be empty")
+
+    if _URL_RE.search(updated_text or ""):
+        errors.append("updatedText must not include URLs")
+
+    before_vars = set(extract_template_vars(current_text or ""))
+    after_vars = set(extract_template_vars(updated_text or ""))
+    if before_vars != after_vars:
+        removed = sorted(before_vars - after_vars)
+        added = sorted(after_vars - before_vars)
+        if removed:
+            errors.append(
+                f"updatedText removed required placeholders: {', '.join(removed)}"
+            )
+        if added:
+            errors.append(
+                f"updatedText added new placeholders (not allowed): {', '.join(added)}"
+            )
+
+    # Avoid accepting a no-op update that only changes trailing whitespace.
+    if (current_text or "").rstrip() == (updated_text or "").rstrip():
+        errors.append("updatedText must change the prompt")
+
+    _ = (target_key or "").strip()
+    return errors
+
+
+_PROMPT_EDIT_SCHEMA_V1 = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "status": {"type": "string", "enum": ["ok", "refused", "error"]},
+        "targetKey": {"type": "string"},
+        "updatedText": {"type": "string"},
+        "rationale": {"type": "string"},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "selfCheck": {"type": "boolean"},
+        "refusalReason": {"type": "string"},
+    },
+    "required": [
+        "status",
+        "targetKey",
+        "updatedText",
+        "rationale",
+        "warnings",
+        "selfCheck",
+        "refusalReason",
+    ],
+}
+
+
+_PROMPT_EDIT_FORMAT_V1 = {
+    "type": "json_schema",
+    "name": "prompt_edit_v1",
+    "strict": True,
+    "schema": _PROMPT_EDIT_SCHEMA_V1,
+}
+
+
+_EDITOR_SYSTEM_PROMPT = """You are a prompt editor.
+
+Task:
+- You will receive a targetKey, the currentText for that key, and a changeRequest.
+- Produce a revised updatedText for that single key only.
+
+Hard constraints:
+- Return JSON only (must match the provided JSON schema).
+- Do not use tools.
+- Preserve ALL template placeholders exactly (e.g., {{profile_text}}, {{chat_transcript}}, {{tie_in_block}}). You may move them, but do not add/remove/rename any placeholders.
+- Do not introduce URLs (http:// or https://).
+
+Refusal:
+- If you cannot comply with the request while satisfying constraints, set status="refused", selfCheck=false, and explain why in refusalReason.
+"""
+
+
+def propose_prompt_edit(
+    *,
+    model: str,
+    target_key: str,
+    current_text: str,
+    change_request: str,
+    dry_run: bool = False,
+    trace_id: str = "",
+) -> Dict[str, Any]:
+    """Ask the model to propose a safe edit for a single prompt key."""
+
+    target_key = (target_key or "").strip()
+    if not target_key:
+        raise RuntimeError("target_key is required")
+
+    current_text = current_text or ""
+    change_request = (change_request or "").strip()
+    if not change_request:
+        raise RuntimeError("change_request is required")
+
+    if dry_run:
+        updated = (current_text.rstrip() + "\n\n[DRY_RUN_EDIT]\n").replace("\r\n", "\n")
+        errors = validate_prompt_edit(
+            target_key=target_key, current_text=current_text, updated_text=updated
+        )
+        if errors:
+            return {
+                "status": "refused",
+                "targetKey": target_key,
+                "updatedText": current_text,
+                "rationale": "Dry-run edit failed validation.",
+                "warnings": ["dry_run"],
+                "selfCheck": False,
+                "refusalReason": "; ".join(errors),
+            }
+        return {
+            "status": "ok",
+            "targetKey": target_key,
+            "updatedText": updated,
+            "rationale": "Dry-run: deterministic placeholder-safe edit.",
+            "warnings": ["dry_run"],
+            "selfCheck": True,
+            "refusalReason": "",
+        }
+
+    ensure_api_key()
+
+    from openai import OpenAI
+
+    client = OpenAI()
+
+    user_payload = {
+        "targetKey": target_key,
+        "currentText": current_text,
+        "changeRequest": change_request,
+        "placeholders": extract_template_vars(current_text),
+    }
+
+    safe_change_preview = (change_request or "").replace("\n", " ").strip()
+    if len(safe_change_preview) > 140:
+        safe_change_preview = safe_change_preview[:140] + "…"
+    _LOG.info(
+        "edit.propose.start trace_id=%s model=%s target_key=%s current_len=%d placeholders=%s change_len=%d change_preview=%r",
+        trace_id or "-",
+        model,
+        target_key,
+        len(current_text or ""),
+        ",".join(extract_template_vars(current_text)) or "-",
+        len(change_request or ""),
+        safe_change_preview,
+    )
+
+    # The model must return a full updatedText (typically similar length to current_text)
+    # embedded in a JSON object. A fixed low token cap can truncate the JSON mid-string
+    # and make it unparsable (e.g., "Unterminated string").
+    approx_output_tokens = int(len(current_text) / 3.2) + 700
+    max_output_tokens = _clamp_int(approx_output_tokens, 1200, 4000)
+    _LOG.info(
+        "edit.propose.budget trace_id=%s max_output_tokens=%d",
+        trace_id or "-",
+        max_output_tokens,
+    )
+
+    base_kwargs: Dict[str, Any] = {
+        "model": model,
+        "input": [
+            {"role": "system", "content": _EDITOR_SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(user_payload, ensure_ascii=False)},
+        ],
+        "tools": [],
+        "tool_choice": "none",
+        "text": {"format": _PROMPT_EDIT_FORMAT_V1},
+    }
+
+    def _create(*, max_tokens: int, include_temperature: bool) -> Any:
+        create_kwargs = dict(base_kwargs)
+        create_kwargs["max_output_tokens"] = int(max_tokens)
+        if include_temperature:
+            create_kwargs["temperature"] = 0.2
+        try:
+            # Prefer raw response so we can log OpenAI request IDs.
+            with_raw = getattr(
+                getattr(client, "responses", None), "with_raw_response", None
+            )
+            if with_raw is not None:
+                raw_resp = with_raw.create(**create_kwargs)
+                # raw_resp: has headers + parse() method
+                try:
+                    req_id = raw_resp.headers.get(
+                        "x-request-id"
+                    ) or raw_resp.headers.get("x-openai-request-id")
+                except Exception:
+                    req_id = None
+                if req_id:
+                    _LOG.info(
+                        "edit.propose.openai trace_id=%s request_id=%s",
+                        trace_id or "-",
+                        req_id,
+                    )
+                return raw_resp.parse()
+
+            return client.responses.create(**create_kwargs)
+        except Exception as e:
+            msg = str(e)
+            # Some models reject temperature; retry once without it.
+            if (
+                include_temperature
+                and "Unsupported parameter" in msg
+                and "temperature" in msg
+            ):
+                try:
+                    create_kwargs.pop("temperature", None)
+                    with_raw = getattr(
+                        getattr(client, "responses", None), "with_raw_response", None
+                    )
+                    if with_raw is not None:
+                        raw_resp = with_raw.create(**create_kwargs)
+                        return raw_resp.parse()
+                    return client.responses.create(**create_kwargs)
+                except Exception as e2:
+                    raise RuntimeError(f"OpenAI editor request failed: {e2}")
+            req_id = getattr(e, "request_id", None)
+            _LOG.error(
+                "edit.propose.request_failed trace_id=%s request_id=%s err=%r",
+                trace_id or "-",
+                req_id or "-",
+                msg,
+            )
+            raise RuntimeError(f"OpenAI editor request failed: {msg}")
+
+    resp = _create(max_tokens=max_output_tokens, include_temperature=True)
+
+    raw = getattr(resp, "output_text", None)
+    if not isinstance(raw, str) or not raw.strip():
+        raise RuntimeError("OpenAI editor response parsing failed: no output_text")
+
+    _LOG.info(
+        "edit.propose.response trace_id=%s output_len=%d",
+        trace_id or "-",
+        len(raw),
+    )
+
+    def _write_trace_artifact(label: str, text: str) -> str:
+        try:
+            web_root = Path(__file__).resolve().parent
+            out_dir = web_root / "out" / "traces"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe_id = (trace_id or "trace").replace("/", "_").replace("\\", "_")
+            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+            p = out_dir / f"{label}_{safe_id}_{ts}.txt"
+            p.write_text(text, encoding="utf-8")
+            return str(p)
+        except Exception:
+            return ""
+
+    def _try_parse_or_retry(first_raw: str) -> Dict[str, Any]:
+        try:
+            parsed = json.loads(first_raw)
+            return parsed if isinstance(parsed, dict) else {"_non_dict": parsed}
+        except Exception as e:
+            # Most common cause: output truncation mid-JSON due to max_output_tokens.
+            tail = (
+                first_raw[-200:].replace("\n", "\\n")
+                if isinstance(first_raw, str)
+                else ""
+            )
+            likely_trunc = isinstance(first_raw, str) and (
+                not first_raw.rstrip().endswith("}")
+            )
+            if likely_trunc and max_output_tokens < 8000:
+                bumped = _clamp_int(
+                    max_output_tokens * 2, max_output_tokens + 200, 8000
+                )
+                _LOG.warning(
+                    "edit.propose.parse_failed_retry trace_id=%s err=%r max_output_tokens=%d bumped=%d tail=%r",
+                    trace_id or "-",
+                    str(e),
+                    max_output_tokens,
+                    bumped,
+                    tail,
+                )
+                resp2 = _create(max_tokens=bumped, include_temperature=False)
+                raw2 = getattr(resp2, "output_text", None)
+                if isinstance(raw2, str) and raw2.strip():
+                    try:
+                        parsed2 = json.loads(raw2)
+                        return (
+                            parsed2
+                            if isinstance(parsed2, dict)
+                            else {"_non_dict": parsed2}
+                        )
+                    except Exception:
+                        tail2 = raw2[-200:].replace("\n", "\\n")
+                        trace_path = _write_trace_artifact(
+                            "edit_non_json",
+                            f"trace_id={trace_id}\nmodel={model}\ntarget_key={target_key}\nmax_output_tokens={max_output_tokens}\nbumped={bumped}\n\nRAW1:\n{first_raw}\n\nRAW2:\n{raw2}\n",
+                        )
+                        raise RuntimeError(
+                            f"OpenAI editor returned non-JSON: {e} (possible truncation; tried max_output_tokens={max_output_tokens} then {bumped}); tail={tail!r}; tail2={tail2!r}; trace={trace_path or '-'}"
+                        )
+            hint = ""
+            if likely_trunc:
+                hint = f" (possible truncation; max_output_tokens={max_output_tokens})"
+            trace_path = _write_trace_artifact(
+                "edit_non_json",
+                f"trace_id={trace_id}\nmodel={model}\ntarget_key={target_key}\nmax_output_tokens={max_output_tokens}\n\nRAW:\n{first_raw}\n",
+            )
+            raise RuntimeError(
+                f"OpenAI editor returned non-JSON: {e}{hint}; tail={tail!r}; trace={trace_path or '-'}"
+            )
+
+    obj = _try_parse_or_retry(raw)
+
+    if not isinstance(obj, dict):
+        raise RuntimeError("OpenAI editor returned non-object JSON")
+
+    # Normalize + apply guardrails; never return an applyable proposal that fails validation.
+    obj.setdefault("warnings", [])
+    if obj.get("targetKey") != target_key:
+        return {
+            "status": "refused",
+            "targetKey": target_key,
+            "updatedText": current_text,
+            "rationale": "Model proposed a different targetKey; refusing.",
+            "warnings": ["target_key_mismatch"],
+            "selfCheck": False,
+            "refusalReason": "targetKey mismatch",
+        }
+
+    updated_text = obj.get("updatedText")
+    if not isinstance(updated_text, str):
+        return {
+            "status": "error",
+            "targetKey": target_key,
+            "updatedText": current_text,
+            "rationale": "Model did not return updatedText as a string.",
+            "warnings": ["invalid_updated_text"],
+            "selfCheck": False,
+            "refusalReason": "",
+        }
+
+    errors = validate_prompt_edit(
+        target_key=target_key, current_text=current_text, updated_text=updated_text
+    )
+    if errors or obj.get("selfCheck") is False or obj.get("status") != "ok":
+        refusal = (
+            obj.get("refusalReason")
+            if isinstance(obj.get("refusalReason"), str)
+            else ""
+        )
+        combined = "; ".join([x for x in [refusal] if x] + errors)
+        return {
+            "status": "refused",
+            "targetKey": target_key,
+            "updatedText": current_text,
+            "rationale": (
+                obj.get("rationale") if isinstance(obj.get("rationale"), str) else ""
+            ),
+            "warnings": (
+                (obj.get("warnings") or [])
+                if isinstance(obj.get("warnings"), list)
+                else []
+            ),
+            "selfCheck": False,
+            "refusalReason": combined or "Proposal failed validation.",
+        }
+
+    return obj
 
 
 def _collapse_blank_lines(s: str) -> str:

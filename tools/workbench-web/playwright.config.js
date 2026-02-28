@@ -12,7 +12,7 @@ module.exports = defineConfig({
         headless: true,
     },
     webServer: {
-        command: `powershell -NoProfile -ExecutionPolicy Bypass -File serve.ps1 -Port ${port}`,
+        command: `powershell -NoProfile -ExecutionPolicy Bypass -File launcher.ps1 -Mode serve -Port ${port}`,
         url: `http://127.0.0.1:${port}/api/apps`,
         reuseExistingServer: true,
         timeout: 60_000,

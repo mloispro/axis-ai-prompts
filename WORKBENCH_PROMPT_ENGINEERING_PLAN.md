@@ -1,7 +1,7 @@
 # Prompt Workbench Plan (Simple, Slick, No-Regressions)
 
-Last updated: 2026-02-25
-Status: Plan only (no code changes in this phase)
+Last updated: 2026-02-27
+Status: As-built notes + forward plan
 Repo: axis-ai-prompts (public — no secrets/PII)
 
 ## Why this plan exists
@@ -66,55 +66,64 @@ Therefore the workbench must optimize for:
 5) Preview the exact system + composed user message.
 6) Apply (with diff preview).
 7) Auto-run the fixture suite and show a compact regression table.
-8) (Ship) Land the change in this repo so the Android app’s raw URL updates.
+8) (Ship) Promote the local draft to the git-tracked canonical file and land the repo diff so the Android app’s raw URL updates.
+
+## 3-minute walkthrough (how a prompt dev actually uses this)
+1) Open the web workbench, select `App` + `Mode`, keep fixtures = ALL.
+2) Skim the always-on preview for 1–2 fixtures to confirm you’re editing the right mode.
+  - If the fixture is `.txt`, that text is the final user message.
+  - If the fixture is `.json`, the user message is rendered from the user template.
+3) Edit ONE thing (system or user template) in the candidate editor (local draft).
+4) Run “Run suite” and scan the table for errors + unexpected flags.
+5) Click through to the HTML report when something looks off (diffs + full outputs).
+6) Optional: use the AI editor to propose a change, then Apply (diff-first) and re-run.
+7) When satisfied: Promote to canonical (writes `prompts/<appId>.json` + updates `updatedAt`).
 
 ## Web UI workflow (today, as built)
-What you can do right now in the local web workbench (good for one-off testing, not regression-proof yet):
+What you can do right now in the local web workbench (fixture-first regression loop):
 
 1) Select App + Mode + Model, optionally toggle “Dry run”.
-2) Edit “System prompt (for selected mode)”.
-3) Optionally edit “User prompt template (for selected mode)”.
-  - This is saved into a local candidate bundle at `tools/workbench-web/state/candidates/<appId>.json` (gitignored).
-4) Paste a one-off “User prompt” (runtime test input).
-5) Click “Run” to call the API and see output + tokens + cost.
+2) Select fixtures (default: ALL fixtures for that app+mode).
+  - Optional: select a single fixture for “Run single”.
+  - Optional: cap with “Max fixtures” for fast cycles.
+3) Candidate edits:
+  - Edit “System prompt (for selected mode)”.
+  - Edit “User prompt template (for selected mode)”.
+  - These are saved into a local candidate bundle at `tools/workbench-web/state/candidates/<appId>.json` (gitignored).
+4) Preview (always-on): see the exact composed Baseline vs Candidate messages BEFORE running.
+  - Preview renders through a no-network compose endpoint (no model call).
+5) Run:
+  - “Run suite” runs Baseline vs Candidate A/B over the fixture set and returns a compact summary plus the rendered inputs per fixture.
+  - “Run single” targets a single fixture.
+6) Advanced (debug-only): a separate ad-hoc section exists for one-off runtime textareas.
 
-Important current limitation:
-- The “Run” action currently executes ONLY the two runtime textareas you see (systemPrompt + userPrompt). It does not yet render the per-mode user template, does not yet compose a structured input object, and does not yet run fixture suites from the UI.
-
-Fixture suite note:
-- The backend already has an A/B suite endpoint (`/api/run/ab`) that runs fixtures and writes an HTML report, but the UI does not expose it yet.
+Notes:
+- The thing you run is the thing you preview (no hidden composition).
+- The suite runner is exposed via the web UI and backed by the existing A/B engine.
 
 ## Canonical data contract (v1)
-Per run, the workbench should operate on a structured input object (regardless of whether the source is a fixture or paste-in text):
+Per run, the workbench should operate on fixture-driven inputs. Today (as built) there are two fixture “contracts”:
 
-### Fields
-- `mode`: `opener | app_chat | reg_chat`
-- `profile_text`: string (opener only)
-- `chat_transcript`: string (app_chat/reg_chat)
-- `tie_in`: string (optional)
-- `user_instructions`: string (optional)
+### Fixture contracts (as built)
+- `.txt` fixtures: already-composed user messages (no template rendering; the file contents are the final user message).
+- `.json` fixtures: structured inputs rendered through the per-mode user template.
+  - Supported keys:
+    - `profile_text` (opener)
+    - `chat_transcript` (app_chat/reg_chat)
+    - `tie_in` (optional)
+  - Optional escape hatch:
+    - `user_prompt` (string): if present and non-blank, it overrides rendering and is treated as the final user message.
 
-### Key decision: user instructions are appended separately
-User instructions are NOT embedded into the user template by default.
-Instead, after rendering the per-mode user template, the workbench appends a separate block:
+### Future extension (planned)
+We may add `user_instructions` as a structured field later.
+If/when we do, the intended behavior is:
+- render the per-mode user template first
+- then append a separate “User-added instructions” block only when non-blank
 
-If `user_instructions` is blank → append nothing.
-
-Else append:
-
-```
-
-User-added instructions:
-<user_instructions>
-```
-
-Rationale:
-- Keeps canonical templates stable and comparable.
-- Lets prompt engineers experiment quickly without rewriting templates.
-- Preserves a clear audit trail in preview + manifests.
+This is intentionally not in the “as-built” contract yet, so engineers don’t assume it exists in regression runs.
 
 ## Message composition algorithm
-Given a prompt bundle for an app (candidate) and a structured input:
+Given a prompt bundle for an app (candidate) and a fixture input:
 
 1) Select system prompt key:
 - opener → `prompts.openerSystem`
@@ -135,14 +144,17 @@ Given a prompt bundle for an app (candidate) and a structured input:
 - if `tie_in` is blank: `""`
 - else: `Naturally work in this topic if possible: <tie_in>`
 
-4) Append user-added instructions block (if present).
+4) Render rules (as built):
+- `.txt` fixtures bypass rendering entirely (the file is the final user text).
+- `.json` fixtures render using the variables above (unless `user_prompt` override is present).
+- After rendering, collapse excessive blank lines and normalize line endings.
 
 5) Preview and run:
 - show the exact system text
 - show the exact composed user text
 - run the model
 
-Reality check (why this is in the plan): the algorithm above is the target behavior. The current web UI does not yet perform this composition end-to-end.
+Contract note: the algorithm above is the expected behavior and should remain the single source of truth for composition (so CLI and web do not drift).
 
 ## Workbench UX plan (web)
 Single page. No tabs needed.
@@ -151,6 +163,11 @@ Single page. No tabs needed.
 - **Baseline**: what the shipping app is expected to use today (usually `prompts/<appId>.json`, optionally a remote raw GitHub URL).
 - **Candidate**: your local draft edits (stored under `tools/workbench-web/state/candidates/<appId>.json`, gitignored).
 - What you “ship” is a normal repo diff to `prompts/<appId>.json` (candidate → commit/merge). The `state/` candidate files are just local drafts.
+
+Terminology note (important for versioning UX):
+- **Draft**: local-only edits that are NOT yet part of git history (candidate bundle + local history).
+- **Repo prompts** (canonical): repo-tracked `prompts/<appId>.json` that will be pushed to GitHub.
+- **Git history**: once promoted to canonical and committed, version history belongs in git (not the workbench).
 
 ### Layout (one screen, optimized)
 - Top row: App | Mode | Model | Dry run
@@ -180,13 +197,15 @@ Single page. No tabs needed.
   - select fixture from `fixtures/<app>/<mode>/` (default: ALL)
   - or “Paste screen scrape” (profile/chat)
 - Structured fields:
-  - opener: `profile_text`, `tie_in`, `user_instructions`
-  - app_chat/reg_chat: `chat_transcript`, `tie_in`, `user_instructions`
+  - opener: `profile_text`, `tie_in`
+  - app_chat/reg_chat: `chat_transcript`, `tie_in`
+
+Future (planned): add `user_instructions` as a structured field, appended as a separate block after template rendering.
 
 ### Preview panel (non-negotiable)
 Always show:
 - the exact system prompt text used
-- the exact composed user message text used (rendered template + appended instructions)
+- the exact composed user message text used (raw `.txt` fixture OR rendered `.json` through the user template)
 
 ### Run (batch-first)
 - Primary button: “Run suite” (all fixtures for app+mode)
@@ -216,9 +235,18 @@ Show a compact table:
 - Output length / token usage / cost
 - Optional: “diff vs baseline” later (not required for MVP)
 
+### Flag semantics (as built)
+The suite currently computes lightweight heuristic flags per output (not a formal pass/fail gate). Examples include:
+- `mentions_ai`, `contains_quotes`, `contains_colon`, `contains_dash`, `mentions_coffee`, `too_many_lines_for_opener`, `empty_output`
+
+Design intent:
+- treat flags as “inspection hints” rather than absolute failures
+- keep the list small and mode-aware
+- consider later promoting a subset to “hard” failures if the team wants automated gating
+
 ## Workbench UX plan (CLI)
 Keep the CLI as the “batch engine” reference.
-Later: add `user_instructions` to `.json` fixtures and implement the same append rule as web.
+Later (optional): add `user_instructions` to `.json` fixtures and implement the append rule consistently in both web + CLI renderers.
 
 ## AI-assisted prompt editing (core feature)
 Prompt engineers should be able to say:
@@ -239,8 +267,8 @@ Prompt engineers should be able to say:
 ### Proposed workflow (diff-first)
 1) Engineer selects ONE target key.
 2) Engineer types a change request.
-3) Workbench calls a reasoning-capable model (ChatGPT latest thinking via Responses API).
-4) Model returns ONLY the updated text for that key (or a minimal patch).
+3) Workbench calls a reasoning-capable model via the Responses API.
+4) Model returns a STRICT structured JSON object (schema-validated) containing ONLY the updated text for that key.
 5) Workbench shows diff and requires explicit Apply.
 6) On apply: auto-run suite and show regression summary.
 
@@ -251,40 +279,212 @@ Prompt engineers should be able to say:
 - Must keep “Output format” constraints consistent (e.g., no quotes if system forbids).
 - Must not silently broaden scope (no extra pages/features).
 
-### Suggested prompt for the editor model (conceptual)
-Inputs provided to the model:
-- target key name
-- current text
-- change request
-- known constraints (mode-specific)
+Additional guardrails (template safety):
+- Must preserve required template variables for that key (e.g. `{{profile_text}}`, `{{chat_transcript}}`, `{{tie_in_block}}`), and MUST NOT introduce new `{{...}}` placeholders.
+- Must not delete or materially weaken any safety/consent/boundary constraints already present in the prompt.
+
+### AI editor API contract (Responses API + Structured Outputs)
+Use Structured Outputs (JSON Schema) so the model returns UI-consumable output with strict adherence.
+
+Key Responses API notes:
+- Use `instructions` for the internal editor instruction set.
+- Use `text.format` for Structured Outputs in Responses (not `response_format`).
+- Set `store: false` for local iteration unless you explicitly need server-side state.
+
+#### Request shape (conceptual)
+Provide the model ONLY what it needs:
+- `targetKey` (one of the allowed keys)
+- `currentText` (the existing value for that key)
+- `changeRequest` (engineer intent)
+- `constraints` (mode-specific + repo constraints)
+
+Recommended settings:
+- Low-ish temperature for stability.
+- No tools (`tools: []`) and force `tool_choice: "none"`.
+- `store: false`.
+
+Operational hardening (optional but recommended):
+- Pin the editor model to a specific snapshot for consistency (avoid silent behavior drift).
+- Make temperature explicit and low (favor deterministic edits).
+- If/when this moves beyond local-only use, set `safety_identifier` (stable, non-PII; hash a user ID/email) and consider `prompt_cache_key` for caching behavior.
+
+#### Strict JSON schema (v1)
+All fields are required, and `additionalProperties: false` everywhere.
+
+```json
+{
+  "name": "prompt_edit_v1",
+  "strict": true,
+  "schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "status": { "type": "string", "enum": ["ok", "refused", "error"] },
+      "targetKey": { "type": "string", "minLength": 1 },
+      "updatedText": { "type": "string" },
+      "rationale": { "type": "string" },
+      "warnings": {
+        "type": "array",
+        "items": { "type": "string" }
+      },
+      "selfCheck": { "type": "boolean" },
+      "refusalReason": { "type": "string" }
+    },
+    "required": [
+      "status",
+      "targetKey",
+      "updatedText",
+      "rationale",
+      "warnings",
+      "selfCheck",
+      "refusalReason"
+    ]
+  }
+}
+```
+
+Refusal handling:
+- If `status == "refused"`, `updatedText` MUST equal the original `currentText` (no changes), and `refusalReason` explains why.
+- The UI should also handle the non-schema refusal edge-case (if the API returns a refusal instead of JSON).
+
+UI rule for refusals (so it’s ironclad):
+- If refused, disable Apply and surface `refusalReason` prominently.
+
+### “Ironclad” internal editor instruction set (v1)
+This is the internal `instructions` string sent to the editor model.
+
+```text
+You are an expert prompt engineer working on a PUBLIC prompt catalog.
+
+Task:
+- You will edit EXACTLY ONE prompt field (the selected targetKey) by rewriting its text.
+
+Hard rules:
+- Modify only the selected targetKey.
+- Output MUST be valid JSON matching the provided schema. No markdown. No extra keys.
+- Do NOT add secrets, personal data, or external URLs.
+- Do NOT broaden scope (no new features, no UI changes, no extra policies).
+- Preserve existing safety/boundary/consent constraints in the currentText; you may strengthen them, but must not weaken or remove them.
+
+Template safety rules (critical):
+- Preserve all existing {{...}} placeholders found in currentText.
+- Do NOT introduce any new {{...}} placeholders.
+
+Quality rules:
+- Keep changes minimal and targeted to the changeRequest.
+- Maintain the original writing style unless the changeRequest asks otherwise.
+
+If you cannot comply with the changeRequest while obeying the rules, set status=refused, keep updatedText identical to currentText, and explain in refusalReason.
+```
+
+### Apply-time validation (workbench-side)
+Even with Structured Outputs, validate before applying:
+- `targetKey` must exactly match the requested key.
+- If `status == "refused"`, do not apply.
+- If `selfCheck == false`, do not apply.
+- Ensure `updatedText` contains all placeholders that existed in `currentText` and contains no new `{{...}}` placeholders.
+- Optionally: run a quick “compiles” check (e.g., no unbalanced braces) before enabling Apply.
+
+## Undo / Reset (non-negotiable for safe iteration)
+Undo/reset are local-only operations on the candidate bundle.
+
+### Edit history (local, unsaved) — AS BUILT
+Problem we solved:
+- The history dropdown was confusing because it mixed “real edits” with suite runs.
+
+As-built behavior:
+- The UI shows an **Edit history** list that includes **only snapshots created by Apply** (reason: `apply:<targetKey>`).
+- Suite runs are **not** shown as “versions” in that list; instead the UI shows a separate **latest suite: clean / not clean** status line.
+- On load/refresh, if there are any edit snapshots, the UI auto-selects the newest snapshot so **Diff/Notes populate immediately**.
+
+Storage (as built):
+- Local snapshots live in `tools/workbench-web/state/history/<appId>.json` (gitignored) and include a `kind` field:
+  - `kind="undo"`: undo stack snapshots (used by Undo)
+  - `kind="draft"`: post-Apply edit snapshots (shown in Edit history)
+  - `kind="suite"`: suite run snapshots (used for publish gating + latest suite status)
+
+Clean definition (as built):
+- “clean” is computed from the latest suite snapshot and is used to enable/disable publishing.
+- Minimum gates:
+  - suite completed (`status == ok`)
+  - candidate has no `empty_output`
+  - (mode-aware) opener also blocks on `too_many_lines_for_opener`
+
+Lifecycle:
+- Local history is cleared when publishing to repo prompts, because from that point forward git is the version history.
+
+### Undo last apply
+- Persist a small history stack under `tools/workbench-web/state/` (recommended default), and also keep the in-memory stack for immediate UX.
+- “Undo” restores the previous candidate bundle text for the last edited key and re-runs compose preview.
+- Undo should NOT delete fixture outputs; it simply changes what will be run next.
+
+### Reset to baseline
+- “Reset” discards the local candidate bundle and reloads from the baseline bundle (normally `prompts/<appId>.json`).
+- Reset requires confirmation (because it’s destructive to local draft state).
+- After reset: preview updates immediately; next run uses baseline-as-candidate (no diff).
+
+### Promote draft to canonical (ship step) — NEW UX PLAN
+Problem:
+- “Apply” updates the local candidate bundle, but shipping requires updating the repo-tracked `prompts/<appId>.json`.
+
+Goal:
+- Add an explicit “Publish to repo prompts” action:
+  - Writes candidate → `prompts/<appId>.json`
+  - Updates `updatedAt` in that canonical file
+  - Clears local draft versions/history because git now tracks versions
+  - Leaves the workbench in a clean state where candidate == baseline (no diff)
+
+Guardrails:
+- Requires confirmation.
+- Should be disabled unless the latest suite run is “clean” (configurable, but recommended).
+- Must never write secrets/PII.
+
+### Editor call inputs/outputs (concrete)
+Inputs provided to the model (as a single user message payload):
+- `targetKey`
+- `currentText`
+- `changeRequest`
+- `constraints` (repo + mode constraints + template var requirements)
 
 Outputs required:
-- updated text only OR minimal patch
-- short rationale
-- self-check list: confirms constraints maintained
+- Strict JSON matching the schema, including:
+  - `updatedText` (the only proposed new value for the selected key)
+  - `rationale`, `warnings`, and `selfCheck`
 
 ## Milestones
 ### M0 — Contract + plan (this document)
-- Define structured input object
-- Lock append rule for `user_instructions`
+- Define fixture contracts (.txt = raw user prompt, .json = structured render w/ `user_prompt` override)
+- Define future `user_instructions` append rule (planned)
 - Define AI edit workflow + guardrails
 
-### M1 — Web: batch run (fastest value)
+### M1 — Web: batch run (fastest value) (DONE)
 - “Run suite” for mode (default action) backed by the existing `/api/run/ab` endpoint
 - Simple results table + link to the HTML report
 
-### M2 — Web: structured input + composed preview (least confusion)
+### M2 — Web: structured input + composed preview (least confusion) (DONE)
 - Fixture picker (default: ALL fixtures) + optional fixture dropdown for “Run single”
 - Variable editors + always-on preview
-- Render the per-mode user template into a composed user message (template + tie-in + appended user instructions)
+- Render `.json` fixtures through the per-mode user template (with tie-in) and preview baseline vs candidate
 - Ensure “Run single/suite” uses the candidate bundle’s selected mode `*System` + rendered `*User`
 - Persist state locally per app
 
-### M3 — AI prompt editor (safe)
+### M3 — AI prompt editor (safe) (DONE)
 - Target selector (one key)
 - Change request field
 - Diff preview + explicit Apply
 - Apply triggers auto suite run
+
+### M3.5 — Draft versions shelf (local, unsaved)
+ (DONE)
+- Store snapshots with `kind` and keep **Edit history = Apply snapshots only**
+- Show latest suite clean/not-clean status separately (suite snapshots are not versions)
+- Auto-select newest edit snapshot so Diff/Notes populate on launch
+
+### M3.6 — Promote to canonical (ship)
+ (DONE)
+- Button to write candidate to `prompts/<appId>.json`
+- Confirmation + require latest suite run to be clean (recommended default)
+- Clear local history on success
 
 ### M4 — Unify engine logic (avoid drift)
 - Shared module for prompt loading + rendering + flags used by CLI and web
@@ -296,6 +496,9 @@ Outputs required:
 - You can pick app+mode and run ALL fixtures (suite-by-default).
 - Preview always shows the exact System + exact composed User that will be run.
 - Editing system/user templates affects what is composed + run (candidate bundle is used for runs).
-- `user_instructions` are appended only when non-blank (never silently embedded into templates).
+- Fixture rendering behaves deterministically:
+  - `.txt` fixtures are treated as already-composed user messages
+  - `.json` fixtures render through the per-mode user template (or `user_prompt` override)
 - You can request an AI-assisted edit to ONE key, see a diff, apply it, and it automatically re-runs the suite.
+- You can undo the last applied edit and reset candidate back to baseline.
 - The final artifact is a normal repo change to `prompts/<appId>.json` that can be merged so the Android app (fetching from GitHub) picks it up.

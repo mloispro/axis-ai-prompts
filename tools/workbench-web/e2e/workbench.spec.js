@@ -7,11 +7,11 @@ test('loads apps, models, and prompt editors', async ({ page }) => {
 
     const appSelect = page.locator('#appSelect');
     await expect(appSelect).toBeVisible();
-    expect(await appSelect.locator('option').count()).toBeGreaterThan(0);
+    await expect.poll(async () => await appSelect.locator('option').count()).toBeGreaterThan(0);
 
     const modeSelect = page.locator('#modeSelect');
     await expect(modeSelect).toBeVisible();
-    expect(await modeSelect.locator('option').count()).toBeGreaterThan(0);
+    await expect.poll(async () => await modeSelect.locator('option').count()).toBeGreaterThan(0);
 
     const modelSelect = page.locator('#modelSelect');
     await expect(modelSelect).toBeVisible();
@@ -67,6 +67,69 @@ test('dry-run suite renders results without API key', async ({ page }) => {
     await expect(page.locator('#results')).toContainText('[DRY_RUN]');
     await expect(page.locator('#results')).toContainText('variant=baseline');
     await expect(page.locator('#results')).toContainText('variant=candidate');
+});
+
+test('dry-run AI editor propose/apply/undo works without API key', async ({ page }) => {
+    await page.goto('/');
+
+    // Enable dry-run so propose does not call OpenAI.
+    await page.locator('#dryRun').check();
+
+    const appSelect = page.locator('#appSelect');
+    const modeSelect = page.locator('#modeSelect');
+
+    const appValues = await appSelect.locator('option').evaluateAll(opts => opts.map(o => o.value));
+    if (appValues.includes('rizzchatai')) {
+        await appSelect.selectOption('rizzchatai');
+        await page.waitForTimeout(200);
+    }
+
+    const modeValues = await modeSelect.locator('option').evaluateAll(opts => opts.map(o => o.value));
+    if (modeValues.includes('opener')) {
+        await modeSelect.selectOption('opener');
+        await page.waitForTimeout(200);
+    }
+
+    // Ensure test starts from a clean candidate state so Undo has a known baseline.
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('#aiResetBtn').click();
+    await expect(page.locator('#aiEditStatus')).toContainText('Reset');
+    await expect.poll(async () => await page.locator('#systemPrompt').inputValue()).not.toContain('DRY_RUN_EDIT');
+
+    // Clear edit history selection so the Diff pane reflects the AI proposal.
+    await page.locator('#draftSelect').selectOption('');
+
+    const targetKey = page.locator('#aiTargetKey');
+    await expect.poll(async () => await targetKey.locator('option').count()).toBeGreaterThan(0);
+
+    // Pick the system key if present.
+    const keyValues = await targetKey.locator('option').evaluateAll(opts => opts.map(o => o.value));
+    if (keyValues.includes('openerSystem')) {
+        await targetKey.selectOption('openerSystem');
+    } else {
+        await targetKey.selectOption(keyValues[0]);
+    }
+
+    await page.locator('#aiChangeRequest').fill('Append a dry-run marker for testing');
+    await page.locator('#aiProposeBtn').click();
+
+    await expect(page.locator('#aiDiff')).toContainText('DRY_RUN_EDIT');
+    await expect(page.locator('#aiApplyBtn')).toBeEnabled();
+
+    const before = await page.locator('#systemPrompt').inputValue();
+
+    await page.locator('#aiApplyBtn').click();
+    await expect(page.locator('#aiEditStatus')).toContainText('Applied');
+    await expect(page.locator('#status')).toContainText('Done');
+
+    const afterApply = await page.locator('#systemPrompt').inputValue();
+    expect(afterApply).toContain('DRY_RUN_EDIT');
+    expect(afterApply.length).toBeGreaterThan(before.length);
+
+    await page.locator('#aiUndoBtn').click();
+    await expect(page.locator('#aiEditStatus')).toContainText('Undone');
+    const afterUndo = await page.locator('#systemPrompt').inputValue();
+    expect(afterUndo).not.toContain('DRY_RUN_EDIT');
 });
 
 test('responsive layout: editors stack on narrow screens', async ({ page }) => {

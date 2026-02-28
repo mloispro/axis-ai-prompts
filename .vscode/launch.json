@@ -5,13 +5,13 @@
       "name": "Workbench Web (run site)",
       "type": "node-terminal",
       "request": "launch",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./tools/workbench-web/dev.ps1\" -Port 8787"
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/tools/workbench-web/launcher.ps1\" -Mode dev -Port 8787"
     },
     {
       "name": "Workbench Web (server only)",
       "type": "node-terminal",
       "request": "launch",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"./tools/workbench-web/dev.ps1\" -Port 8787 -NoOpen"
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/tools/workbench-web/launcher.ps1\" -Mode dev -Port 8787 -NoOpen"
     }
   ]
 }

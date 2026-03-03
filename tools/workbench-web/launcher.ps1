@@ -6,6 +6,7 @@ param(
     [string]$HostAddress = '127.0.0.1',
 
     [switch]$NoOpen,
+    [switch]$RestartOnPortInUse,
     [int]$OpenTimeoutSeconds = 15,
 
     [int]$MaxPortTries = 20,
@@ -82,6 +83,66 @@ function Wait-HttpOk([string]$url, [int]$timeoutSeconds) {
     return $false
 }
 
+function Start-OpenWhenReadyJob([string]$apiUrl, [string]$homeUrl, [int]$timeoutSeconds) {
+    if ($NoOpen) {
+        return
+    }
+
+    # Avoid racing the browser open before the server is actually reachable.
+    # Run as a background job so foreground uvicorn logs remain in the terminal.
+    try {
+        Start-Job -ScriptBlock {
+            param($ApiUrl, $HomeUrl, $TimeoutSeconds)
+
+            $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+            while ((Get-Date) -lt $deadline) {
+                try {
+                    $resp = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 $ApiUrl
+                    if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500) {
+                        Start-Process $HomeUrl | Out-Null
+                        return
+                    }
+                }
+                catch {
+                    Start-Sleep -Milliseconds 250
+                }
+            }
+        } -ArgumentList $apiUrl, $homeUrl, $timeoutSeconds | Out-Null
+        return
+    }
+    catch {
+        # Some environments disable PowerShell jobs. Fall back to a detached poller process
+        # instead of opening immediately (which can cause ERR_CONNECTION_REFUSED).
+        try {
+            $cmd = @"
+\$ApiUrl = '$apiUrl'
+\$HomeUrl = '$homeUrl'
+\$TimeoutSeconds = $timeoutSeconds
+\$deadline = (Get-Date).AddSeconds(\$TimeoutSeconds)
+while ((Get-Date) -lt \$deadline) {
+  try {
+    \$resp = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 \$ApiUrl
+    if (\$resp.StatusCode -ge 200 -and \$resp.StatusCode -lt 500) {
+      Start-Process \$HomeUrl | Out-Null
+      exit 0
+    }
+  } catch {
+    Start-Sleep -Milliseconds 250
+  }
+}
+"@
+            Start-Process -WindowStyle Hidden -FilePath powershell -ArgumentList @(
+                '-NoProfile',
+                '-ExecutionPolicy', 'Bypass',
+                '-Command', $cmd
+            ) | Out-Null
+        }
+        catch {
+            # Last resort: do nothing.
+        }
+    }
+}
+
 function Test-PortFree([int]$portToTest) {
     $listener = $null
     try {
@@ -100,9 +161,15 @@ function Test-PortFree([int]$portToTest) {
 
 function Stop-ByProcessId([int]$processId) {
     try {
-        $p = Get-Process -Id $processId -ErrorAction Stop
-        Stop-Process -Id $processId -Force
-        Write-Output "Stopped PID $processId ($($p.ProcessName))"
+        # Prefer stopping first; some environments restrict process introspection.
+        Stop-Process -Id $processId -Force -ErrorAction Stop
+        try {
+            $p = Get-Process -Id $processId -ErrorAction Stop
+            Write-Output "Stopped PID $processId ($($p.ProcessName))"
+        }
+        catch {
+            Write-Output "Stopped PID $processId"
+        }
         return $true
     }
     catch {
@@ -246,9 +313,35 @@ function Start-Foreground([int]$fixedPort, [bool]$useReload) {
 
     $pythonExe = Resolve-Path ".\\.venv\\Scripts\\python.exe"
     $openUrl = "http://${HostAddress}:$fixedPort/"
+    $apiUrl = "http://${HostAddress}:$fixedPort/api/apps"
+
+    # If the port is already in use, dev/serve should be able to recover.
+    if (-not (Test-PortFree -portToTest $fixedPort)) {
+        $alreadyUp = Wait-HttpOk -url $apiUrl -timeoutSeconds 1
+        if ($alreadyUp -and -not $RestartOnPortInUse) {
+            Write-Output "Workbench already running at $openUrl"
+            Start-OpenWhenReadyJob -apiUrl $apiUrl -homeUrl $openUrl -timeoutSeconds $OpenTimeoutSeconds
+            return
+        }
+
+        Write-Output "Port $fixedPort is in use; stopping existing listener..."
+        try { Stop-ByPort -portToStop $fixedPort | Out-Null } catch {}
+        Start-Sleep -Milliseconds 300
+
+        # If we couldn't stop it, avoid failing by trying to bind again.
+        if (-not (Test-PortFree -portToTest $fixedPort)) {
+            $stillUp = Wait-HttpOk -url $apiUrl -timeoutSeconds 1
+            if ($stillUp) {
+                Write-Output "Workbench already running at $openUrl"
+                Start-OpenWhenReadyJob -apiUrl $apiUrl -homeUrl $openUrl -timeoutSeconds $OpenTimeoutSeconds
+                return
+            }
+            throw "Port $fixedPort is in use but the server is not responding. Close the existing process holding the port, or run the launcher in a terminal with enough permissions to stop it."
+        }
+    }
 
     Write-Output "Starting workbench at $openUrl"
-    if (-not $NoOpen) { try { Start-Process $openUrl } catch {} }
+    Start-OpenWhenReadyJob -apiUrl $apiUrl -homeUrl $openUrl -timeoutSeconds $OpenTimeoutSeconds
 
     if ($useReload) {
         & $pythonExe -m uvicorn server:app --reload --host $HostAddress --port $fixedPort --log-level info
@@ -266,6 +359,11 @@ switch ($Mode) {
     'stop' {
         if (Stop-FromLastJson) { exit 0 }
         if (Stop-ByPort -portToStop $Port) { exit 0 }
+        $apiUrl = "http://${HostAddress}:$Port/api/apps"
+        if (Wait-HttpOk -url $apiUrl -timeoutSeconds 1) {
+            Write-Output "Workbench is responding at http://${HostAddress}:$Port/ but could not be stopped by PID/port. Close the existing terminal/process holding the port or run with enough permissions."
+            exit 1
+        }
         Write-Output "Nothing to stop."
         exit 0
     }

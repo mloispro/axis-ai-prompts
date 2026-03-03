@@ -1,0 +1,112 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Workbench: Start",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/workbench-web/launcher.ps1",
+                "-Mode",
+                "dev",
+                "-Port",
+                "7532",
+                "-RestartOnPortInUse"
+            ],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            },
+            "isBackground": true,
+            "presentation": {
+                "label": "Workbench Web",
+                "reveal": "always",
+                "panel": "dedicated",
+                "group": "workbench-web",
+                "showReuseMessage": false,
+                "clear": true
+            },
+            "problemMatcher": {
+                "owner": "uvicorn",
+                "pattern": {
+                    "regexp": "^ERROR.*$",
+                    "message": 0
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "Starting workbench at",
+                    "endsPattern": "Application startup complete"
+                }
+            },
+            "runOptions": {
+                "instanceLimit": 1
+            }
+        },
+        {
+            "label": "Workbench: Restart",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/workbench-web/launcher.ps1",
+                "-Mode",
+                "dev",
+                "-Port",
+                "7532",
+                "-RestartOnPortInUse"
+            ],
+            "isBackground": true,
+            "presentation": {
+                "label": "Workbench Web",
+                "reveal": "always",
+                "panel": "dedicated",
+                "group": "workbench-web",
+                "showReuseMessage": false,
+                "clear": true
+            },
+            "problemMatcher": {
+                "owner": "uvicorn",
+                "pattern": {
+                    "regexp": "^ERROR.*$",
+                    "message": 0
+                },
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": "Starting workbench at",
+                    "endsPattern": "Application startup complete"
+                }
+            }
+        },
+        {
+            "label": "Workbench: Stop",
+            "type": "shell",
+            "command": "powershell",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}/tools/workbench-web/launcher.ps1",
+                "-Mode",
+                "stop",
+                "-Port",
+                "7532"
+            ],
+            "presentation": {
+                "label": "Workbench Web",
+                "reveal": "silent",
+                "panel": "dedicated",
+                "group": "workbench-web",
+                "showReuseMessage": false
+            },
+            "problemMatcher": []
+        }
+    ]
+}

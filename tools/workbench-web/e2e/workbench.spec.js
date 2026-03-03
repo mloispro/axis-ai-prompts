@@ -141,12 +141,12 @@ test('responsive layout: editors stack on narrow screens', async ({ page }) => {
     await expect(systemPrompt).toBeVisible();
     await expect(userTemplate).toBeVisible();
 
-    // Wide: expect side-by-side layout.
+    // Wide: stacked layout (chosen UX spec).
     const wideA = await systemPrompt.boundingBox();
     const wideB = await userTemplate.boundingBox();
     expect(wideA && wideB).toBeTruthy();
-    expect(Math.abs(wideA.y - wideB.y)).toBeLessThan(30);
-    expect(wideA.x).toBeLessThan(wideB.x);
+    expect(Math.abs(wideA.x - wideB.x)).toBeLessThan(30);
+    expect(wideA.y).toBeLessThan(wideB.y);
 
     const wideOverflow = await page.evaluate(() => {
         const el = document.documentElement;
@@ -154,7 +154,7 @@ test('responsive layout: editors stack on narrow screens', async ({ page }) => {
     });
     expect(wideOverflow).toBeLessThanOrEqual(1);
 
-    // Narrow: breakpoint at 720px should stack the 2 editors vertically.
+    // Narrow: still stacked, and should not overflow.
     await page.setViewportSize({ width: 700, height: 900 });
     await page.goto('/');
     await expect(systemPrompt).toBeVisible();

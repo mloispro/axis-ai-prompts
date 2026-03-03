@@ -710,6 +710,20 @@ def index() -> FileResponse:
     return FileResponse(str(STATIC_DIR / "index.html"))
 
 
+@app.get("/css/workbench.css")
+def serve_css() -> FileResponse:
+    return FileResponse(
+        str(STATIC_DIR / "css" / "workbench.css"), media_type="text/css"
+    )
+
+
+@app.get("/js/workbench.js")
+def serve_js() -> FileResponse:
+    return FileResponse(
+        str(STATIC_DIR / "js" / "workbench.js"), media_type="application/javascript"
+    )
+
+
 @app.get("/api/apps")
 def api_apps() -> JSONResponse:
     return JSONResponse(_list_apps())

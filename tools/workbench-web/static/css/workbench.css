@@ -1,0 +1,211 @@
+*, *::before, *::after { box-sizing: border-box; }
+
+    body {
+      font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
+      font-size: 14px;
+      background: #f7f7f8;
+      color: #111;
+      margin: 0;
+    }
+
+    /* ── Top bar ── */
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      align-items: flex-end;
+      gap: 12px;
+      padding: 10px 16px;
+      background: #fff;
+      border-bottom: 1px solid #e5e5e5;
+      flex-wrap: wrap;
+    }
+    .topbar-title { font-weight: 700; font-size: 15px; margin-bottom: 2px; margin-right: 4px; white-space: nowrap; }
+    .topbar-sep { color: #ddd; margin-bottom: 2px; }
+
+    label {
+      display: block;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #666;
+      margin-bottom: 3px;
+    }
+
+    select,
+    input[type="number"],
+    input[type="text"] {
+      padding: 6px 10px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      background: #fff;
+      font-size: 13px;
+      font-family: inherit;
+      color: #111;
+      outline: none;
+    }
+    select:focus, input:focus { border-color: #888; }
+
+    textarea {
+      display: block;
+      width: 100%;
+      padding: 12px;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      background: #fff;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 13px;
+      line-height: 1.6;
+      resize: vertical;
+      outline: none;
+      color: #111;
+    }
+    textarea:focus { border-color: #888; }
+
+    /* ── Buttons ── */
+    .btn {
+      padding: 7px 14px;
+      border-radius: 7px;
+      border: 1px solid #111;
+      background: #111;
+      color: #fff;
+      font-size: 13px;
+      font-family: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .btn:hover:not(:disabled) { background: #222; }
+    .btn:disabled { background: #ccc; border-color: #ccc; cursor: not-allowed; }
+    .btn-ghost { background: transparent; color: #555; border-color: #ddd; }
+    .btn-ghost:hover:not(:disabled) { background: #f0f0f0; color: #111; border-color: #bbb; }
+    .btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 6px; }
+
+    /* ── Main two-column layout ── */
+    .playground {
+      display: grid;
+      grid-template-columns: minmax(340px, 45%) 1fr;
+      min-height: calc(100vh - 54px);
+      align-items: start;
+    }
+    @media (max-width: 820px) { .playground { grid-template-columns: 1fr; } }
+
+    /* ── Left: Editor panel ── */
+    .editor-panel {
+      border-right: 1px solid #e5e5e5;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+      min-height: calc(100vh - 54px);
+    }
+    .editor-body { flex: 1; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+    .section-label {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.05em; color: #999; margin-bottom: 5px;
+    }
+    .editor-footer {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 16px; border-top: 1px solid #e5e5e5;
+    }
+    .flex-1 { flex: 1; }
+
+    /* ── AI Improve bar ── */
+    .ai-bar { border: 1px solid #ddd; border-radius: 10px; background: #fafafa; overflow: hidden; }
+    .ai-bar:focus-within { border-color: #888; }
+    .ai-bar-row { display: flex; align-items: center; }
+    .ai-bar-input {
+      flex: 1; border: none; background: transparent;
+      padding: 10px 12px; font-size: 13px; font-family: inherit;
+      outline: none; color: #111; min-width: 0;
+    }
+    .ai-bar-input::placeholder { color: #bbb; }
+    .ai-target-pills {
+      display: flex; align-items: center; gap: 3px;
+      padding: 0 8px; border-left: 1px solid #e5e5e5; flex-shrink: 0;
+    }
+    .pill-btn {
+      padding: 3px 9px; border-radius: 12px; border: 1px solid transparent;
+      background: transparent; font-size: 11px; font-weight: 600;
+      cursor: pointer; color: #888; font-family: inherit;
+    }
+    .pill-btn.active { background: #111; color: #fff; border-color: #111; }
+    .pill-btn:hover:not(.active) { background: #f0f0f0; color: #333; border-color: #ddd; }
+    .ai-run-btn {
+      border: none; border-left: 1px solid #e5e5e5; background: transparent;
+      padding: 10px 14px; cursor: pointer; color: #111; font-size: 15px; line-height: 1; flex-shrink: 0;
+    }
+    .ai-run-btn:hover:not(:disabled) { background: #f0f0f0; }
+    .ai-run-btn:disabled { color: #ccc; cursor: not-allowed; }
+
+    /* Colored diff */
+    .diff-area {
+      border-top: 1px solid #e5e5e5; padding: 10px 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 12px; line-height: 1.6; max-height: 240px; overflow-y: auto; background: #fff;
+    }
+    .dl-add { color: #166534; background: #f0fdf4; display: block; padding: 0 2px; border-radius: 2px; }
+    .dl-del { color: #b91c1c; background: #fef2f2; display: block; padding: 0 2px; border-radius: 2px; }
+    .dl-ctx { color: #555; display: block; }
+    .dl-hdr { color: #2563eb; display: block; }
+
+    .ai-action-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; border-top: 1px solid #e5e5e5; background: #fff;
+    }
+    .ai-status { font-size: 12px; color: #555; }
+    .ai-err    { font-size: 12px; color: #b91c1c; }
+
+    /* ── Right: Run panel ── */
+    .run-panel { background: #f7f7f8; display: flex; flex-direction: column; }
+    .run-header {
+      display: flex; align-items: flex-end; gap: 10px;
+      padding: 10px 16px; background: #fff;
+      border-bottom: 1px solid #e5e5e5; flex-wrap: wrap;
+    }
+    .run-results { padding: 16px; flex: 1; }
+
+    /* Result cards */
+    pre {
+      white-space: pre-wrap; background: #0b0f14; color: #e6edf3;
+      padding: 10px 14px; border-radius: 8px; overflow: auto;
+      font-size: 12px; line-height: 1.6; margin: 0;
+    }
+    .result-card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; overflow: hidden; margin-bottom: 10px; }
+    .result-card-header {
+      padding: 10px 14px; font-weight: 600; font-size: 13px;
+      cursor: pointer; display: flex; align-items: center; gap: 6px; list-style: none;
+    }
+    .result-card-header::before { content: '›'; display: inline-block; transition: transform 0.15s; }
+    details[open] .result-card-header::before { transform: rotate(90deg); }
+    .result-card-body { padding: 12px 14px; border-top: 1px solid #e5e5e5; }
+    .result-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 640px) { .result-grid { grid-template-columns: 1fr; } }
+    .col-label {
+      font-size: 11px; font-weight: 600; color: #888;
+      text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px;
+    }
+
+    /* ── Advanced accordion ── */
+    .advanced-wrap { border-top: 1px solid #e5e5e5; background: #fff; }
+    details.adv > summary {
+      cursor: pointer; padding: 10px 16px; font-size: 12px; font-weight: 700;
+      color: #777; text-transform: uppercase; letter-spacing: 0.05em;
+      list-style: none; display: flex; align-items: center; gap: 6px; user-select: none;
+    }
+    details.adv > summary::before { content: '›'; display: inline-block; transition: transform 0.15s; }
+    details.adv[open] > summary::before { transform: rotate(90deg); }
+    .adv-body { padding: 16px; border-top: 1px solid #f0f0f0; display: flex; flex-direction: column; gap: 20px; }
+    .adv-row  { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+    .adv-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 820px) { .adv-row { grid-template-columns: 1fr; } .adv-row2 { grid-template-columns: 1fr; } }
+    .adv-section-title {
+      font-size: 11px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.05em; color: #aaa; margin-bottom: 8px;
+    }
+
+    /* Misc */
+    .check-row { display: flex; align-items: center; gap: 6px; }
+    .muted { color: #888; font-size: 12px; }
+    .ok  { color: #166534; font-size: 12px; }
+    .err { color: #b91c1c; font-size: 12px; }

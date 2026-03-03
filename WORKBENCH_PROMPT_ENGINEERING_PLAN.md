@@ -1,7 +1,7 @@
 # Prompt Workbench Plan (Simple, Slick, No-Regressions)
 
-Last updated: 2026-02-27
-Status: As-built notes + forward plan
+Last updated: 2026-03-02
+Status: As-built notes + forward plan + active UI redesign (Playground)
 Repo: axis-ai-prompts (public — no secrets/PII)
 
 ## Why this plan exists
@@ -486,8 +486,136 @@ Outputs required:
 - Confirmation + require latest suite run to be clean (recommended default)
 - Clear local history on success
 
+### M3.7 — Playground UI redesign (IN PROGRESS)
+See "Playground UI design (M3.7)" section below for full spec.
+
+Key goals:
+- Replace three-column complex layout with two-column OpenAI-Playground-style layout.
+- Move inline AI improve bar directly below the prompt editors (no separate card).
+- Collapse all non-critical controls into an Advanced accordion.
+
 ### M4 — Unify engine logic (avoid drift)
 - Shared module for prompt loading + rendering + flags used by CLI and web
+
+## Playground UI design (M3.7)
+
+### Rationale
+The previous 3-column flex layout was too busy. Every control was visible at once, making the page hard to scan. The new design prioritizes one mental model: **edit on the left, run on the right**, everything else hidden until needed.
+
+Reference: OpenAI Chat Playground (clean two-column, textarea dominant, controls minimal).
+
+### Layout (two-column split)
+
+```
+┌─ topbar (sticky) ─────────────────────────────────────────────────┐
+│  Prompt Workbench | App ▾ | Mode ▾ | Model ▾ | □ Dry run  status │
+└───────────────────────────────────────────────────────────────────┘
+┌─ editor-panel (45%) ─────────┬─ run-panel (55%) ──────────────────┐
+│ SYSTEM PROMPT                │ Fixture ▾  Max [0]  [Run]  status  │
+│ ┌──────────────────────────┐ │                                     │
+│ │ textarea                 │ │  results (scrollable)               │
+│ └──────────────────────────┘ │                                     │
+│ USER TEMPLATE                │                                     │
+│ ┌──────────────────────────┐ │                                     │
+│ │ textarea                 │                                     │
+│ └──────────────────────────┘ │                                     │
+│ ASK AI TO IMPROVE            │                                     │
+│ ┌────────────────┬Sys│User┬▶┐│                                     │
+│ │ input          │   │    │ ││                                     │
+│ └────────────────┴───┴────┴─┘│                                     │
+│ [diff area – hidden until AI]│                                     │
+│ [Apply] [Discard]            │                                     │
+├──────────────────────────────┴─────────────────────────────────────┤
+│ [Undo] [Reset]                          [Publish to repo] status   │
+└────────────────────────────────────────────────────────────────────┘
+▶ Advanced ──────────────────────────────────────────────────────────
+  Edit History | Diff/Notes | Preview | Bundle metadata | JSON | Tune
+```
+
+### Editor panel (left, 45%)
+- **System Prompt** — large textarea, `id="systemPrompt"`, `min-height: 260px`
+- **User Template** — textarea, `id="userTemplate"`, `min-height: 100px`
+- **AI Improve bar** — inline bar anchored below the editors:
+  - Text input `id="aiChangeRequest"` — placeholder "E.g., make it warmer… (Enter to run)"
+  - **Sys / User pill toggle** — `id="aiTargetSysBtn"` / `id="aiTargetUserBtn"` — selects which textarea the AI edits
+  - Run button `id="aiProposeBtn"` (▶)
+  - `id="aiDiffWrap"` — hidden until a proposal arrives; contains:
+    - `<div class="diff-area" id="aiDiff">` — colored inline diff
+    - Action row: `[Apply id=aiApplyBtn]` `[Discard id=aiDiscardBtn]` `span#aiAppliedInfo` `span#aiError`
+  - `<pre id="aiNotes">` — hidden (used for compatibility; notes surface in Advanced)
+  - `<select id="aiTargetKey">` — hidden select (still drives server call; pills sync it)
+- **Footer** — `[Undo]` `[Reset]` spacer `[Publish to repo]` `span#promoteStatus`
+
+### Run panel (right, 55%)
+- **Header strip**: `select#fixtureSelect` | `input#maxFixturesInput` | `button#runSuiteBtn` | `span#status`
+- **Results area**: `div#results` (scrollable, no fixed height cap; result cards expand inline)
+
+### Advanced accordion (collapsed by default)
+Contains everything that was previously "above the fold" but rarely needed during iteration:
+
+| Sub-section | Elements |
+|---|---|
+| Edit History | `draftSelect`, `draftMeta`, `draftRefreshBtn`, `draftRestoreBtn`, `lastTraceId` (+ logs link) |
+| Diff / Notes (history) | `pre#aiDiffAdv`, `pre#aiNotesAdv` — replacing old `aiDiff`/`aiNotes` for snapshot diffs |
+| Preview | `previewStatus`, `baselinePreviewSystem/User`, `candidatePreviewSystem/User` |
+| Bundle metadata | `updatedAtInput`, `ttlSecondsInput`, `versionInput` |
+| JSON editor | `formatJsonBtn`, `validateJsonBtn`, `candidateJson`, `jsonStatus`, `jsonError` |
+| Ad-hoc tune | `userPrompt`, `runTuneBtn`, `tuneStatus` |
+
+### AI improve bar UX rules
+1. **Sys pill active by default** — maps to the mode's `*System` key.
+2. **User pill** — maps to the mode's `*User` key.
+3. **Enter key** triggers propose (no need to click ▶).
+4. **Diff renders inline with color** — `+` lines green, `-` lines red, `@@` headers blue.
+5. **Apply is disabled until proposal is `status=ok` and `selfCheck=true`**.
+6. **Discard** calls `clearAiProposal()` and hides `aiDiffWrap`.
+7. **Changing the input text** disables Apply immediately (stale proposal guard).
+8. **Pill buttons stay in sync** with the hidden `aiTargetKey` select (and vice versa).
+
+### Colored diff rendering
+New function `renderColoredDiff(rawText, targetEl)` replaces `textContent` assignment:
+- Splits diff text on `\n`
+- For each line: creates a `<span>` with class `dl-add` / `dl-del` / `dl-hdr` / `dl-ctx`
+- Never uses `innerHTML` with user data (createElement + textContent only)
+
+### JS changes required (for `workbench.js`)
+
+**New functions:**
+```javascript
+function renderColoredDiff(rawText, targetEl) { /* span per line, classList by prefix */ }
+function setAiTarget(which)                    { /* sync pills + hidden aiTargetKey select */ }
+```
+
+**Modified functions:**
+- `clearAiProposal()` → also sets `aiDiffWrap.style.display = 'none'` and clears `aiDiff.innerHTML`
+- `aiPropose()` → calls `renderColoredDiff()` and sets `aiDiffWrap.style.display = ''`
+- `onDraftSelected()` → writes to `aiDiffAdv` / `aiNotesAdv` (not `aiDiff` / `aiNotes`)
+
+**New event listeners:**
+- `aiTargetSysBtn` → `setAiTarget('sys')`
+- `aiTargetUserBtn` → `setAiTarget('user')`
+- `aiDiscardBtn` → `clearAiProposal()`; clear `aiEditStatus`
+- `aiChangeRequest` keydown Enter → `aiPropose()`
+- `aiTargetKey` change → sync pills; `clearAiProposal()`; `onDraftSelected()`
+
+### File structure after componentization
+
+```
+tools/workbench-web/static/
+  index.html          ← HTML shell only (~200 lines); links to css + js
+  css/
+    workbench.css     ← all styles extracted from <style> block
+  js/
+    workbench.js      ← all JS extracted + new functions added
+```
+
+Benefits:
+- Each file is independently editable without scrolling 1300 lines
+- CSS changes don't risk corrupting JS (no giant monolith)
+- JS can be searched/edited with grep without noise from HTML/CSS
+- `index.html` now purely describes structure (easy to reason about layout)
+
+---
 
 ## Open questions
 - Do we need a “strict output” toggle (extra guardrails) for opener/app_chat? (Maybe)

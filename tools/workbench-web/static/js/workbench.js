@@ -196,13 +196,20 @@ async function refreshDrafts() {
   latestSuite = res.latestSuite || null;
   latestSuiteIsClean = res.latestSuiteIsClean === true;
 
+  // Filter to only snapshots matching the current mode (opener / app_chat / reg_chat).
+  const currentMode = document.getElementById('modeSelect').value;
+  const modePrefix = (MODE_TO_PROMPT_KEY[currentMode] || '').replace('System', '');
+  const visibleVersions = modePrefix
+    ? draftVersions.filter(v => !v.targetKey || String(v.targetKey).startsWith(modePrefix))
+    : draftVersions;
+
   sel.innerHTML = '';
   const opt0 = document.createElement('option');
   opt0.value = '';
-  opt0.textContent = draftVersions.length ? 'Select an edit…' : 'No edits yet';
+  opt0.textContent = visibleVersions.length ? 'Select an edit…' : 'No edits yet';
   sel.appendChild(opt0);
 
-  for (const v of draftVersions) {
+  for (const v of visibleVersions) {
     const opt = document.createElement('option');
     opt.value = v.id || '';
     const when = v.savedAt ? String(v.savedAt) : '';
@@ -238,12 +245,12 @@ async function refreshDrafts() {
 
   // Populate Diff/Notes on launch by auto-selecting a draft.
   // Preference order: preserve prior selection → newest.
-  const stillExists = prevSelectedId && draftVersions.some(v => v && v.id === prevSelectedId);
+  const stillExists = prevSelectedId && visibleVersions.some(v => v && v.id === prevSelectedId);
   const toSelect = stillExists
     ? prevSelectedId
-    : (draftVersions[0] ? String(draftVersions[0].id || '') : '');
+    : (visibleVersions[0] ? String(visibleVersions[0].id || '') : '');
 
-  const canSelect = toSelect && draftVersions.some(v => v && v.id === toSelect);
+  const canSelect = toSelect && visibleVersions.some(v => v && v.id === toSelect);
   if (canSelect) {
     sel.value = toSelect;
     await onDraftSelected();
@@ -654,6 +661,7 @@ async function onAppChanged() {
   modeSelect.addEventListener('change', () => {
     if (currentCandidate) syncFieldsFromCandidate(currentCandidate);
     loadFixtures().catch(() => { });
+    refreshDrafts().catch(() => { });
   });
 
   const modelSelect = document.getElementById('modelSelect');
@@ -792,18 +800,16 @@ function renderSuiteResults(run) {
   const items = run.items || [];
   const totals = run.totals || {};
 
-  const totalsLine = `Tokens (totals) — baseline in/out/total/cached: ${esc(String(totals.baselineInputTokens ?? 0))} / ${esc(String(totals.baselineOutputTokens ?? 0))} / ${esc(String(totals.baselineTotalTokens ?? 0))} / ${esc(String(totals.baselineCachedTokens ?? 0))}<br/>` +
-    `candidate in/out/total/cached: ${esc(String(totals.candidateInputTokens ?? 0))} / ${esc(String(totals.candidateOutputTokens ?? 0))} / ${esc(String(totals.candidateTotalTokens ?? 0))} / ${esc(String(totals.candidateCachedTokens ?? 0))}`;
+  const totalsLine = `Tokens — live in/out: ${esc(String(totals.baselineInputTokens ?? 0))}/${esc(String(totals.baselineOutputTokens ?? 0))} &nbsp;·&nbsp; draft in/out: ${esc(String(totals.candidateInputTokens ?? 0))}/${esc(String(totals.candidateOutputTokens ?? 0))}`;
 
   let html = `
-        <div class="muted">Report: ${reportLink || '(not available)'}<br/>${totalsLine}</div>
+        <div class="muted">Report: ${reportLink || '(not available)'} &nbsp;·&nbsp; ${totalsLine}</div>
         <div style="height:10px"></div>
       `;
 
   for (const it of items) {
     const name = it.fixture || '';
-    const binp = it.baselineInput || '';
-    const cinp = it.candidateInput || '';
+    const inp = it.baselineInput || it.candidateInput || '';
     const bout = it.baselineOutput || '';
     const cout = it.candidateOutput || '';
     const bflags = Array.isArray(it.baselineFlags) ? it.baselineFlags.join(',') : '';
@@ -812,34 +818,28 @@ function renderSuiteResults(run) {
     const cerr = it.candidateError || '';
 
     html += `
-          <details class="card" style="padding:12px; border-color:#eee;">
-            <summary style="cursor:pointer;"><strong>${esc(name)}</strong></summary>
-            <div style="height:10px"></div>
-            <div class="grid2">
+          <details class="card ab-fixture" open>
+            <summary><strong>${esc(name)}</strong></summary>
+            <div style="height:8px"></div>
+            <details class="ab-input-toggle">
+              <summary>Input</summary>
+              <pre class="ab-input-pre">${esc(inp)}</pre>
+            </details>
+            <div style="height:8px"></div>
+            <div class="result-grid">
               <div>
-                <div class="muted"><strong>Baseline input</strong></div>
-                <pre>${esc(binp)}</pre>
+                <div class="ab-col-label ab-col-live">Live</div>
+                <div class="muted ab-flags">flags: ${esc(bflags || '(none)')}${berr ? ` | error: ${esc(berr)}` : ''}</div>
+                <pre class="ab-output">${esc(bout)}</pre>
               </div>
               <div>
-                <div class="muted"><strong>Candidate input</strong></div>
-                <pre>${esc(cinp)}</pre>
-              </div>
-            </div>
-            <div style="height:10px"></div>
-            <div class="grid2">
-              <div>
-                <div class="muted"><strong>Baseline output</strong></div>
-                <div class="muted">flags: ${esc(bflags || '(none)')}${berr ? ` | error: ${esc(berr)}` : ''}</div>
-                <pre>${esc(bout)}</pre>
-              </div>
-              <div>
-                <div class="muted"><strong>Candidate output</strong></div>
-                <div class="muted">flags: ${esc(cflags || '(none)')}${cerr ? ` | error: ${esc(cerr)}` : ''}</div>
-                <pre>${esc(cout)}</pre>
+                <div class="ab-col-label ab-col-draft">Draft</div>
+                <div class="muted ab-flags">flags: ${esc(cflags || '(none)')}${cerr ? ` | error: ${esc(cerr)}` : ''}</div>
+                <pre class="ab-output">${esc(cout)}</pre>
               </div>
             </div>
           </details>
-          <div style="height:10px"></div>
+          <div style="height:8px"></div>
         `;
   }
 

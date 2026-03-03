@@ -562,3 +562,113 @@ details.adv[open]>summary::before {
   color: #b91c1c;
   font-size: 12px;
 }
+
+/* ── A/B result cards ── */
+details.ab-fixture {
+  padding: 12px;
+  border-color: #e8e8e8;
+}
+
+details.ab-fixture>summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+details.ab-fixture>summary::before {
+  content: '›';
+  display: inline-block;
+  transition: transform 0.15s;
+  color: #aaa;
+  font-size: 14px;
+}
+
+details.ab-fixture[open]>summary::before {
+  transform: rotate(90deg);
+}
+
+/* Collapsed input toggle */
+details.ab-input-toggle {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 0;
+  background: #fafafa;
+}
+
+details.ab-input-toggle>summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: #777;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  list-style: none;
+  user-select: none;
+  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+details.ab-input-toggle>summary::before {
+  content: '›';
+  font-size: 14px;
+  color: #aaa;
+  display: inline-block;
+  transition: transform 0.15s;
+}
+
+details.ab-input-toggle[open]>summary::before {
+  transform: rotate(90deg);
+}
+
+details.ab-input-toggle[open] {
+  border-color: #ccc;
+}
+
+pre.ab-input-pre {
+  padding: 0 10px;
+  border-top: 1px solid #e8e8e8;
+}
+
+pre.ab-input-pre {
+  margin: 6px 0 2px;
+  font-size: 11px;
+  color: #666;
+  white-space: pre-wrap;
+}
+
+/* Column labels */
+.ab-col-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 4px;
+}
+
+.ab-col-live {
+  color: #16a34a;
+}
+
+/* green — deployed */
+.ab-col-draft {
+  color: #2563eb;
+}
+
+/* blue  — work in progress */
+
+.ab-flags {
+  margin-bottom: 4px;
+}
+
+pre.ab-output {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+}

@@ -845,12 +845,43 @@ def call_openai(
 
     client = OpenAI()
 
-    resp = client.responses.create(
-        model=model,
-        input=messages,
-        temperature=temperature,
-        max_output_tokens=max_output_tokens,
-    )
+    create_kwargs: Dict[str, Any] = {
+        "model": model,
+        "input": messages,
+        "temperature": temperature,
+        "max_output_tokens": max_output_tokens,
+    }
+    try:
+        resp = client.responses.create(**create_kwargs)
+    except Exception as e:
+        # Some models (e.g. o-series) reject temperature.
+        # Detect via SDK .param attribute or message text; retry once without it.
+        is_temp_unsupported = (
+            getattr(e, "param", None) == "temperature"
+            or "temperature" in str(e).lower()
+        )
+        if is_temp_unsupported:
+            create_kwargs.pop("temperature", None)
+            resp = client.responses.create(**create_kwargs)
+        else:
+            raise
+
+    # Detect reasoning-model token exhaustion: the model consumed the entire
+    # budget on internal reasoning, leaving no tokens for the output message
+    # (status='incomplete', reasoning_tokens ≈ output_tokens).  Retry once with
+    # 3× the budget so the model can actually produce a reply.
+    if getattr(resp, "status", None) == "incomplete":
+        used = getattr(resp, "usage", None)
+        reasoning_tokens: int = 0
+        if used:
+            details = getattr(used, "output_tokens_details", None)
+            if details:
+                reasoning_tokens = int(getattr(details, "reasoning_tokens", 0) or 0)
+        output_tokens_used = int(getattr(used, "output_tokens", 0) or 0)
+        if reasoning_tokens >= max(output_tokens_used - 1, 1):
+            bumped = min(max_output_tokens * 3, 4000)
+            create_kwargs["max_output_tokens"] = bumped
+            resp = client.responses.create(**create_kwargs)
 
     usage_dict = _usage_to_dict(getattr(resp, "usage", None))
 
@@ -858,20 +889,24 @@ def call_openai(
     if isinstance(text, str) and text.strip():
         return text.strip(), usage_dict
 
-    # Fallback: best-effort extraction.
+    # Fallback: best-effort extraction from output items.
     try:
         chunks: List[str] = []
         for item in resp.output:
-            for c in item.content:
+            for c in getattr(item, "content", []) or []:
                 if getattr(c, "type", "") == "output_text":
-                    chunks.append(c.text)
+                    chunks.append(getattr(c, "text", ""))
         out = "".join(chunks).strip()
         if out:
             return out, usage_dict
     except Exception:
         pass
 
-    raise RuntimeError("OpenAI response parsing failed: no text output")
+    status = getattr(resp, "status", "unknown")
+    raise RuntimeError(
+        f"OpenAI response parsing failed: no text output "
+        f"(status={status}, max_output_tokens={max_output_tokens})"
+    )
 
 
 def basic_heuristic_flags(mode: str, text: str) -> List[str]:
@@ -1193,7 +1228,7 @@ def main_argv(argv: Sequence[str]) -> int:
     parser.add_argument("--mode", required=True, choices=MODES)
     parser.add_argument("--model", default="gpt-4o-mini")
     parser.add_argument("--temperature", type=float, default=0.4)
-    parser.add_argument("--max-output-tokens", type=int, default=200)
+    parser.add_argument("--max-output-tokens", type=int, default=1200)
     parser.add_argument("--max-fixtures", type=int, default=0, help="0 = all")
     parser.add_argument(
         "--only-fixture",

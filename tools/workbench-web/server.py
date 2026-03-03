@@ -192,6 +192,23 @@ def _draft_entries(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
+def _is_dry_run_entry(d: Dict[str, Any]) -> bool:
+    """Return True if this history entry is a dry-run test artifact, not a real user edit."""
+    # Check notes field for dry_run warning line
+    notes_text = str(d.get("notes") or "")
+    if "dry_run" in notes_text.lower():
+        return True
+    # Check if any candidate prompt text contains the dry-run marker
+    cand = d.get("candidate")
+    if isinstance(cand, dict):
+        prompts = cand.get("prompts")
+        if isinstance(prompts, dict):
+            for v in prompts.values():
+                if isinstance(v, str) and "[DRY_RUN" in v:
+                    return True
+    return False
+
+
 def _suite_entries(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Return suite snapshots, newest-last.
 
@@ -1197,31 +1214,27 @@ def api_drafts(appId: str = "") -> JSONResponse:
     items = _read_history(app_id)
     drafts = list(reversed(_draft_entries(items)))
 
-    # Only show versions that represent actual prompt edits.
-    # Today that means: post-apply snapshots.
+    # Only show versions that represent real user edits:
+    # post-apply snapshots that are not dry-run test artifacts.
     edit_drafts = [
         d
         for d in drafts
-        if isinstance(d, dict) and str(d.get("reason") or "").startswith("apply:")
+        if isinstance(d, dict)
+        and str(d.get("reason") or "").startswith("apply:")
+        and not _is_dry_run_entry(d)
     ]
 
     out: List[Dict[str, Any]] = []
     for d in edit_drafts:
         if not isinstance(d, dict):
             continue
+        # Only expose user-facing fields — no internal metadata (traceId, model, notes).
         ent: Dict[str, Any] = {
             "id": str(d.get("id") or ""),
             "savedAt": str(d.get("savedAt") or ""),
             "reason": str(d.get("reason") or ""),
         }
-        for k in [
-            "targetKey",
-            "model",
-            "changeRequest",
-            "traceId",
-            "notes",
-            "suite",
-        ]:
+        for k in ["targetKey", "changeRequest"]:
             if k in d:
                 ent[k] = d.get(k)
         ent["isClean"] = bool(_compute_is_clean(d))
@@ -1488,7 +1501,7 @@ def api_run_tune(payload: Dict[str, Any]) -> JSONResponse:
             model=model,
             messages=messages,
             temperature=0.7,
-            max_output_tokens=512,
+            max_output_tokens=1200,
         )
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -160,21 +160,24 @@ function Test-PortFree([int]$portToTest) {
 }
 
 function Stop-ByProcessId([int]$processId) {
+    if ($processId -le 0) { return $false }
+    # Try Stop-Process first.
     try {
-        # Prefer stopping first; some environments restrict process introspection.
         Stop-Process -Id $processId -Force -ErrorAction Stop
-        try {
-            $p = Get-Process -Id $processId -ErrorAction Stop
-            Write-Output "Stopped PID $processId ($($p.ProcessName))"
-        }
-        catch {
-            Write-Output "Stopped PID $processId"
-        }
+        Write-Output "Stopped PID $processId"
         return $true
     }
-    catch {
-        return $false
+    catch { }
+    # Fallback: taskkill (works in more contexts than Stop-Process).
+    try {
+        $result = & taskkill /F /PID $processId 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output "Stopped PID $processId (via taskkill)"
+            return $true
+        }
     }
+    catch { }
+    return $false
 }
 
 function Get-ListeningProcessIdForPort([int]$portToFind) {
@@ -209,7 +212,25 @@ function Get-ListeningProcessIdForPort([int]$portToFind) {
 function Stop-ByPort([int]$portToStop) {
     $processId = Get-ListeningProcessIdForPort -portToFind $portToStop
     if ($processId -gt 0) {
-        return Stop-ByProcessId -processId $processId
+        $killed = Stop-ByProcessId -processId $processId
+        if ($killed) { return $true }
+    }
+    # Last resort: if a WSL distro is running it may own the port via NAT forwarding.
+    # Shutting down WSL releases all forwarded ports cleanly.
+    $wslRunning = $false
+    try {
+        $wslOut = & wsl --list --running 2>&1
+        $wslRunning = ($LASTEXITCODE -eq 0) -and ($wslOut -match '\S')
+    }
+    catch { }
+    if ($wslRunning) {
+        Write-Output "Port $portToStop appears WSL-forwarded. Running wsl --shutdown to release it..."
+        try { & wsl --shutdown 2>&1 | Out-Null } catch { }
+        Start-Sleep -Milliseconds 800
+        if (Test-PortFree -portToTest $portToStop) {
+            Write-Output "Port $portToStop released after wsl --shutdown."
+            return $true
+        }
     }
     return $false
 }
@@ -328,20 +349,44 @@ function Start-Foreground([int]$fixedPort, [bool]$useReload) {
         try { Stop-ByPort -portToStop $fixedPort | Out-Null } catch {}
         Start-Sleep -Milliseconds 300
 
-        # If we couldn't stop it, avoid failing by trying to bind again.
+        # If we couldn't stop it, auto-find the next free port rather than failing.
         if (-not (Test-PortFree -portToTest $fixedPort)) {
-            $stillUp = Wait-HttpOk -url $apiUrl -timeoutSeconds 1
-            if ($stillUp) {
-                Write-Output "Workbench already running at $openUrl"
-                Start-OpenWhenReadyJob -apiUrl $apiUrl -homeUrl $openUrl -timeoutSeconds $OpenTimeoutSeconds
-                return
+            $tries = 0
+            while ($tries -lt $MaxPortTries -and -not (Test-PortFree -portToTest $fixedPort)) {
+                $fixedPort++
+                $tries++
             }
-            throw "Port $fixedPort is in use but the server is not responding. Close the existing process holding the port, or run the launcher in a terminal with enough permissions to stop it."
+            if ($tries -ge $MaxPortTries) {
+                throw "Could not find a free port near $Port. Kill stale processes manually."
+            }
+            Write-Output "Original port was stuck; using port $fixedPort instead."
+            $openUrl = "http://${HostAddress}:$fixedPort/"
+            $apiUrl = "http://${HostAddress}:$fixedPort/api/apps"
         }
     }
 
     Write-Output "Starting workbench at $openUrl"
     Start-OpenWhenReadyJob -apiUrl $apiUrl -homeUrl $openUrl -timeoutSeconds $OpenTimeoutSeconds
+
+    # Write last.json so stop/restart can find this process reliably.
+    $logDir = Join-Path $root "out\\launcher"
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $lastFile = Join-Path $logDir "last.json"
+
+    # Uvicorn runs in-process (foreground) — record current PID as proxy.
+    # On --reload, uvicorn spawns a child; PID here is the parent watcher, which
+    # when killed takes the worker with it.
+    try {
+        $obj = @{
+            pid       = $PID
+            port      = $fixedPort
+            url       = $openUrl
+            startedAt = (Get-Date).ToUniversalTime().ToString('o')
+            mode      = if ($useReload) { 'dev' } else { 'serve' }
+        }
+        ($obj | ConvertTo-Json -Depth 4) | Set-Content -Encoding UTF8 -Path $lastFile
+    }
+    catch { }
 
     if ($useReload) {
         & $pythonExe -m uvicorn server:app --reload --host $HostAddress --port $fixedPort --log-level info

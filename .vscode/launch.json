@@ -5,7 +5,32 @@
       "name": "▶ Workbench",
       "type": "node-terminal",
       "request": "launch",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/tools/workbench-web/launcher.ps1\" -Mode dev -Port 7532 -RestartOnPortInUse"
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/tools/workbench-web/launcher.ps1\" -Mode serve -Port 7540 -RestartOnPortInUse -NoPortDrift"
+    },
+    {
+      "name": "🐞 Workbench: Debug (fixed 7540)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "cwd": "${workspaceFolder}/tools/workbench-web",
+      "python": "${workspaceFolder}\\tools\\workbench-web\\.venv\\Scripts\\python.exe",
+      "args": [
+        "server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "7540",
+        "--log-level",
+        "info"
+      ],
+      "preLaunchTask": "Workbench: Debug: Ensure Port 7540 Free",
+      "postDebugTask": "Workbench: Debug: Stop",
+      "console": "integratedTerminal",
+      "justMyCode": true,
+      "serverReadyAction": {
+        "action": "openExternally",
+        "pattern": "Uvicorn running on (http://\\S+)"
+      }
     }
   ]
 }

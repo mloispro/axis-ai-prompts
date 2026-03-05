@@ -436,7 +436,7 @@ def propose_prompt_edit(
     def _create(*, max_tokens: int, include_temperature: bool) -> Any:
         create_kwargs = dict(base_kwargs)
         create_kwargs["max_output_tokens"] = int(max_tokens)
-        if include_temperature:
+        if include_temperature and not _model_rejects_temperature(model):
             create_kwargs["temperature"] = 0.2
         try:
             # Prefer raw response so we can log OpenAI request IDs.
@@ -835,6 +835,26 @@ def _usage_to_dict(usage: Any) -> Dict[str, Any]:
     return out
 
 
+def _model_rejects_temperature(model: str) -> bool:
+    """Return True for models known to reject `temperature` in the Responses API.
+
+    The OpenAI API surface is model-dependent; GPT-5 and o-series reasoning models
+    may reject sampling params like `temperature`.
+    """
+
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    # GPT-5 family (gpt-5, gpt-5-mini, gpt-5.2, etc.)
+    if m.startswith("gpt-5"):
+        return True
+    # o-series reasoning models (o1, o3, o4-mini, etc.).
+    # Avoid matching unrelated models like omni-moderation-latest.
+    if re.match(r"^o\d", m):
+        return True
+    return False
+
+
 def call_openai(
     model: str,
     messages: List[Dict[str, Any]],
@@ -848,9 +868,10 @@ def call_openai(
     create_kwargs: Dict[str, Any] = {
         "model": model,
         "input": messages,
-        "temperature": temperature,
         "max_output_tokens": max_output_tokens,
     }
+    if not _model_rejects_temperature(model):
+        create_kwargs["temperature"] = temperature
     try:
         resp = client.responses.create(**create_kwargs)
     except Exception as e:

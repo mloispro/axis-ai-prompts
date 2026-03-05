@@ -3,108 +3,131 @@
     "tasks": [
         {
             "label": "Workbench: Start",
-            "type": "shell",
-            "command": "powershell",
+            "type": "process",
+            "command": "powershell.exe",
             "args": [
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}/tools/workbench-web/launcher.ps1",
+                "${workspaceFolder}\\tools\\workbench-web\\launcher.ps1",
                 "-Mode",
-                "dev",
+                "serve",
                 "-Port",
-                "7532",
-                "-RestartOnPortInUse"
+                "7540",
+                "-RestartOnPortInUse",
+                "-NoPortDrift",
+                "-Detached"
             ],
             "group": {
                 "kind": "build",
                 "isDefault": true
             },
-            "isBackground": true,
+            "isBackground": false,
             "presentation": {
-                "label": "Workbench Web",
                 "reveal": "always",
                 "panel": "dedicated",
                 "group": "workbench-web",
                 "showReuseMessage": false,
                 "clear": true
             },
-            "problemMatcher": {
-                "owner": "uvicorn",
-                "pattern": {
-                    "regexp": "^ERROR.*$",
-                    "message": 0
-                },
-                "background": {
-                    "activeOnStart": true,
-                    "beginsPattern": "Starting workbench at",
-                    "endsPattern": "Application startup complete"
-                }
-            },
+            "problemMatcher": [],
             "runOptions": {
                 "instanceLimit": 1
             }
         },
         {
             "label": "Workbench: Restart",
-            "type": "shell",
-            "command": "powershell",
+            "type": "process",
+            "command": "powershell.exe",
             "args": [
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}/tools/workbench-web/launcher.ps1",
+                "${workspaceFolder}\\tools\\workbench-web\\launcher.ps1",
                 "-Mode",
-                "dev",
+                "serve",
                 "-Port",
-                "7532",
-                "-RestartOnPortInUse"
+                "7540",
+                "-RestartOnPortInUse",
+                "-NoPortDrift",
+                "-Restart",
+                "-Detached"
             ],
-            "isBackground": true,
+            "isBackground": false,
             "presentation": {
-                "label": "Workbench Web",
                 "reveal": "always",
                 "panel": "dedicated",
                 "group": "workbench-web",
                 "showReuseMessage": false,
                 "clear": true
             },
-            "problemMatcher": {
-                "owner": "uvicorn",
-                "pattern": {
-                    "regexp": "^ERROR.*$",
-                    "message": 0
-                },
-                "background": {
-                    "activeOnStart": true,
-                    "beginsPattern": "Starting workbench at",
-                    "endsPattern": "Application startup complete"
-                }
-            }
+            "problemMatcher": []
         },
         {
             "label": "Workbench: Stop",
-            "type": "shell",
-            "command": "powershell",
+            "type": "process",
+            "command": "powershell.exe",
             "args": [
                 "-NoProfile",
                 "-ExecutionPolicy",
                 "Bypass",
                 "-File",
-                "${workspaceFolder}/tools/workbench-web/launcher.ps1",
+                "${workspaceFolder}\\tools\\workbench-web\\launcher.ps1",
                 "-Mode",
                 "stop",
                 "-Port",
-                "7532"
+                "7540"
             ],
             "presentation": {
-                "label": "Workbench Web",
                 "reveal": "silent",
                 "panel": "dedicated",
                 "group": "workbench-web",
                 "showReuseMessage": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Workbench: Debug: Stop",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                "${workspaceFolder}\\tools\\workbench-web\\launcher.ps1",
+                "-Mode",
+                "stop",
+                "-Port",
+                "7540"
+            ],
+            "presentation": {
+                "reveal": "silent",
+                "panel": "dedicated",
+                "group": "workbench-web",
+                "showReuseMessage": false
+            },
+            "problemMatcher": []
+        },
+        {
+            "label": "Workbench: Debug: Ensure Port 7540 Free",
+            "type": "process",
+            "command": "powershell.exe",
+            "args": [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "try { & '${workspaceFolder}\\tools\\workbench-web\\launcher.ps1' -Mode stop -Port 7540 | Out-Null } catch { } ; Start-Sleep -Milliseconds 200 ; try { $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 7540) ; $l.Start() ; $l.Stop() ; Write-Host 'Port 7540 is free.' ; exit 0 } catch { Write-Host 'ERROR: Port 7540 is in use. Close the other process (or change the debug port in .vscode/launch.json) then try again.' ; exit 1 }"
+            ],
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated",
+                "group": "workbench-web",
+                "showReuseMessage": false,
+                "clear": true
             },
             "problemMatcher": []
         }

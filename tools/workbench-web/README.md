@@ -17,6 +17,10 @@ Local-only web UI for iterating on prompt content stored in this same repo.
 VS Code (easy Play/Restart + auto-reload):
 - Run and Debug → **Workbench Web (run site)** (uses `run.bat dev`, which runs `uvicorn --reload`)
 
+VS Code (C#-style F5 debugging, fixed port, breakpoints reliable):
+- Run and Debug → **🐞 Workbench: Debug (fixed 7540)** (runs `uvicorn` without `--reload` on `http://127.0.0.1:7540`)
+- If `7540` is already in use, the pre-launch check fails loudly so you don’t debug the wrong process.
+
 Restart / stop (handy during development):
 - Restart: `run.bat restart`
 - Stop: `run.bat stop`

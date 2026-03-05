@@ -21,6 +21,8 @@ import urllib.request
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 
+import subprocess
+
 
 def _find_repo_root(start: Path) -> Path:
     cur = start.resolve()
@@ -64,6 +66,20 @@ def _setup_logging() -> logging.Logger:
 
 LOG = _setup_logging()
 
+SERVER_PID = os.getpid()
+
+
+def _try_git_head_sha(cwd: Path) -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=str(cwd), stderr=subprocess.DEVNULL
+        )
+        sha = out.decode("utf-8").strip()
+        return sha if sha else ""
+    except Exception:
+        return ""
+
+
 # Candidate + optional local baseline live under tools/workbench-web/state/ for local iteration (gitignored).
 STATE_DIR = WEB_ROOT / "state"
 CANDIDATES_DIR = STATE_DIR / "candidates"
@@ -91,6 +107,9 @@ def _ensure_state_dirs() -> None:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+SERVER_STARTED_AT = _utc_now_iso()
 
 
 def _new_id() -> str:
@@ -144,6 +163,7 @@ def _push_draft_version(
     *,
     kind: str = "draft",
     reason: str,
+    mode: str = "",
     target_key: str = "",
     model: str = "",
     change_request: str = "",
@@ -163,6 +183,8 @@ def _push_draft_version(
         "reason": (reason or "").strip() or "snapshot",
         "candidate": candidate_obj,
     }
+    if (mode or "").strip():
+        entry["mode"] = mode.strip()
     if (target_key or "").strip():
         entry["targetKey"] = target_key.strip()
     if (model or "").strip():
@@ -1036,6 +1058,10 @@ def api_edit_apply(payload: Dict[str, Any], request: Request) -> JSONResponse:
     model = (payload.get("model") or "").strip()
     change_request = (payload.get("changeRequest") or "").strip()
     notes = (payload.get("notes") or "").strip()
+    mode = (payload.get("mode") or "").strip()
+    if mode and mode not in ("opener", "app_chat", "reg_chat"):
+        # Ignore unknown modes for forward-compat.
+        mode = ""
 
     trace_id = getattr(getattr(request, "state", None), "trace_id", "") or ""
     LOG.info(
@@ -1093,6 +1119,7 @@ def api_edit_apply(payload: Dict[str, Any], request: Request) -> JSONResponse:
         app_id,
         cand_obj,
         reason=f"apply:{target_key}",
+        mode=mode,
         target_key=target_key,
         model=model,
         change_request=change_request,
@@ -1214,15 +1241,24 @@ def api_drafts(appId: str = "") -> JSONResponse:
     items = _read_history(app_id)
     drafts = list(reversed(_draft_entries(items)))
 
-    # Only show versions that represent real user edits:
-    # post-apply snapshots that are not dry-run test artifacts.
+    # Show post-apply snapshots (including dry-run edits).
+    # Dry-run is commonly used when no API key is configured, and users still
+    # expect applied changes to appear in Edit History.
     edit_drafts = [
         d
         for d in drafts
-        if isinstance(d, dict)
-        and str(d.get("reason") or "").startswith("apply:")
-        and not _is_dry_run_entry(d)
+        if isinstance(d, dict) and str(d.get("reason") or "").startswith("apply:")
     ]
+
+    def _infer_mode_from_target_key(tk: str) -> str:
+        t = (tk or "").strip()
+        if t.startswith("opener"):
+            return "opener"
+        if t.startswith("appChat"):
+            return "app_chat"
+        if t.startswith("regChat"):
+            return "reg_chat"
+        return ""
 
     out: List[Dict[str, Any]] = []
     for d in edit_drafts:
@@ -1234,6 +1270,13 @@ def api_drafts(appId: str = "") -> JSONResponse:
             "savedAt": str(d.get("savedAt") or ""),
             "reason": str(d.get("reason") or ""),
         }
+        # Expose mode if known so the client can filter history per-mode.
+        mode_val = str(d.get("mode") or "").strip()
+        if not mode_val:
+            tk = str(d.get("targetKey") or "").strip()
+            mode_val = _infer_mode_from_target_key(tk)
+        if mode_val:
+            ent["mode"] = mode_val
         for k in ["targetKey", "changeRequest"]:
             if k in d:
                 ent[k] = d.get(k)
@@ -1768,4 +1811,20 @@ def api_open_last() -> JSONResponse:
 def api_config() -> JSONResponse:
     return JSONResponse(
         {"aiPromptsIndexUrl": AI_PROMPTS_INDEX_URL, "repoRoot": str(REPO_ROOT)}
+    )
+
+
+@app.get("/api/info")
+def api_info(request: Request) -> JSONResponse:
+    # Use request.base_url so the UI sees the exact origin/port it's connected to.
+    origin = str(getattr(request, "base_url", "") or "").rstrip("/")
+    sha = _try_git_head_sha(REPO_ROOT)
+    return JSONResponse(
+        {
+            "origin": origin,
+            "pid": SERVER_PID,
+            "startedAt": SERVER_STARTED_AT,
+            "gitSha": sha,
+            "repoRoot": str(REPO_ROOT),
+        }
     )

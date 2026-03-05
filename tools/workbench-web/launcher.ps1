@@ -7,6 +7,9 @@ param(
 
     [switch]$NoOpen,
     [switch]$RestartOnPortInUse,
+    [switch]$Restart,
+    [switch]$Detached,
+    [switch]$NoPortDrift,
     [int]$OpenTimeoutSeconds = 15,
 
     [int]$MaxPortTries = 20,
@@ -170,7 +173,8 @@ function Stop-ByProcessId([int]$processId) {
     catch { }
     # Fallback: taskkill (works in more contexts than Stop-Process).
     try {
-        $result = & taskkill /F /PID $processId 2>&1
+        $result = & taskkill /F /T /PID $processId 2>&1
+        $null = $result
         if ($LASTEXITCODE -eq 0) {
             Write-Output "Stopped PID $processId (via taskkill)"
             return $true
@@ -178,6 +182,108 @@ function Stop-ByProcessId([int]$processId) {
     }
     catch { }
     return $false
+}
+
+function Start-Detached([int]$fixedPort, [bool]$useReload) {
+    Initialize-Venv
+
+    if ($Restart) {
+        Write-Output "[launcher] restart requested; stopping previous server (best-effort)..."
+        try { Stop-FromLastJson | Out-Null } catch { }
+        Start-Sleep -Milliseconds 250
+    }
+
+    $openUrl = "http://${HostAddress}:$fixedPort/"
+    $apiUrl = "http://${HostAddress}:$fixedPort/api/apps"
+
+    # If the port is already in use, dev/serve should be able to recover.
+    if (-not (Test-PortFree -portToTest $fixedPort)) {
+        $alreadyUp = Wait-HttpOk -url $apiUrl -timeoutSeconds 1
+        if ($alreadyUp -and -not $RestartOnPortInUse -and -not $Restart) {
+            Write-Output "Workbench already running at $openUrl"
+            Start-OpenWhenReadyJob -apiUrl $apiUrl -homeUrl $openUrl -timeoutSeconds $OpenTimeoutSeconds
+            return
+        }
+
+        Write-Output "Port $fixedPort is in use; stopping existing listener..."
+        try { Stop-ByPort -portToStop $fixedPort | Out-Null } catch {}
+        Start-Sleep -Milliseconds 300
+
+        # If we couldn't stop it, auto-find the next free port rather than failing.
+        # The UI shows the exact origin/port in the top bar to avoid confusion.
+        if (-not (Test-PortFree -portToTest $fixedPort)) {
+            if ($NoPortDrift) {
+                throw "Port $fixedPort is in use and could not be stopped. (Fixed-port mode: refusing to drift.)"
+            }
+            $originalPort = $fixedPort
+            $tries = 0
+            while ($tries -lt $MaxPortTries -and -not (Test-PortFree -portToTest $fixedPort)) {
+                $fixedPort++
+                $tries++
+            }
+            if ($tries -ge $MaxPortTries) {
+                throw "Could not find a free port near $originalPort. Kill stale processes manually."
+            }
+            Write-Output "WARNING: Port $originalPort is stuck; using port $fixedPort instead. Use the URL printed below (and note the port)."
+            $openUrl = "http://${HostAddress}:$fixedPort/"
+            $apiUrl = "http://${HostAddress}:$fixedPort/api/apps"
+        }
+    }
+
+    $logDir = Join-Path $root "out\\launcher"
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $modeLabel = if ($useReload) { 'dev' } else { 'serve' }
+    $logFileOut = Join-Path $logDir ("uvicorn-{0}-{1}.out.log" -f $modeLabel, $fixedPort)
+    $logFileErr = Join-Path $logDir ("uvicorn-{0}-{1}.err.log" -f $modeLabel, $fixedPort)
+    New-Item -ItemType File -Force -Path $logFileOut | Out-Null
+    New-Item -ItemType File -Force -Path $logFileErr | Out-Null
+
+    Write-Output "Starting workbench at $openUrl"
+    Write-Output "Logs: $logFileOut"
+    Write-Output "Errors: $logFileErr"
+
+    $pythonExe = Resolve-Path ".\\.venv\\Scripts\\python.exe"
+    $argList = @(
+        '-m', 'uvicorn', 'server:app'
+    )
+    if ($useReload) {
+        $argList += '--reload'
+    }
+    $argList += @(
+        '--host', $HostAddress,
+        '--port', "$fixedPort",
+        '--log-level', 'info'
+    )
+
+    $proc = Start-Process -FilePath $pythonExe -WorkingDirectory $root -ArgumentList $argList -RedirectStandardOutput $logFileOut -RedirectStandardError $logFileErr -PassThru
+
+    $ok = Wait-HttpOk -url $apiUrl -timeoutSeconds $StartupTimeoutSeconds
+    if (-not $ok) {
+        try { Stop-ByProcessId -processId $proc.Id | Out-Null } catch {}
+        throw "Server did not become ready within ${StartupTimeoutSeconds}s. See logs: $logFileOut and $logFileErr"
+    }
+
+    try {
+        $startedAt = (Get-Date).ToUniversalTime().ToString('o')
+        $lastFile = Join-Path $logDir "last.json"
+        $obj = @{
+            pid       = $proc.Id
+            port      = $fixedPort
+            url       = $openUrl
+            startedAt = $startedAt
+            mode      = $modeLabel
+        }
+        ($obj | ConvertTo-Json -Depth 4) | Set-Content -Encoding UTF8 -Path $lastFile
+    }
+    catch {
+        # Non-fatal.
+    }
+
+    if (-not $NoOpen) {
+        Start-Process $openUrl | Out-Null
+    }
+
+    Write-Output "Server PID: $($proc.Id)"
 }
 
 function Get-ListeningProcessIdForPort([int]$portToFind) {
@@ -209,7 +315,35 @@ function Get-ListeningProcessIdForPort([int]$portToFind) {
     return 0
 }
 
+function Get-ServerPidFromApi([string]$baseUrl) {
+    if (-not $baseUrl) { return 0 }
+    $infoUrl = $baseUrl.TrimEnd('/') + '/api/info'
+    try {
+        $resp = Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 $infoUrl
+        if (-not $resp -or -not $resp.Content) { return 0 }
+        $obj = $resp.Content | ConvertFrom-Json
+        if ($obj -and $obj.pid) {
+            return [int]($obj.pid)
+        }
+    }
+    catch {
+        return 0
+    }
+    return 0
+}
+
 function Stop-ByPort([int]$portToStop) {
+    # Prefer asking the running server for its own PID (most reliable in environments
+    # where netstat/Get-NetTCPConnection report a non-existent OwningProcess PID).
+    try {
+        $apiPid = Get-ServerPidFromApi -baseUrl ("http://${HostAddress}:$portToStop")
+        if ($apiPid -gt 0) {
+            $killed = Stop-ByProcessId -processId $apiPid
+            if ($killed) { return $true }
+        }
+    }
+    catch { }
+
     $processId = Get-ListeningProcessIdForPort -portToFind $portToStop
     if ($processId -gt 0) {
         $killed = Stop-ByProcessId -processId $processId
@@ -247,9 +381,20 @@ function Stop-FromLastJson() {
         $obj = Get-Content -Raw -Path $lastFile | ConvertFrom-Json
         $processId = [int]($obj.pid)
         $portFromFile = [int]($obj.port)
+        $urlFromFile = ""
+        try { if ($obj.url) { $urlFromFile = [string]($obj.url) } } catch { }
 
+        # Most reliable: stop the root process we started (kills children via /T).
         if ($processId -gt 0 -and (Stop-ByProcessId -processId $processId)) {
             return $true
+        }
+
+        # Next best: ask the currently running server for its PID.
+        if ($urlFromFile) {
+            $apiPid = Get-ServerPidFromApi -baseUrl $urlFromFile
+            if ($apiPid -gt 0 -and (Stop-ByProcessId -processId $apiPid)) {
+                return $true
+            }
         }
 
         if ($portFromFile -gt 0 -and (Stop-ByPort -portToStop $portFromFile)) {
@@ -350,16 +495,21 @@ function Start-Foreground([int]$fixedPort, [bool]$useReload) {
         Start-Sleep -Milliseconds 300
 
         # If we couldn't stop it, auto-find the next free port rather than failing.
+        # The UI shows the exact origin/port in the top bar to avoid confusion.
         if (-not (Test-PortFree -portToTest $fixedPort)) {
+            if ($NoPortDrift) {
+                throw "Port $fixedPort is in use and could not be stopped. (Fixed-port mode: refusing to drift.)"
+            }
+            $originalPort = $fixedPort
             $tries = 0
             while ($tries -lt $MaxPortTries -and -not (Test-PortFree -portToTest $fixedPort)) {
                 $fixedPort++
                 $tries++
             }
             if ($tries -ge $MaxPortTries) {
-                throw "Could not find a free port near $Port. Kill stale processes manually."
+                throw "Could not find a free port near $originalPort. Kill stale processes manually."
             }
-            Write-Output "Original port was stuck; using port $fixedPort instead."
+            Write-Output "WARNING: Port $originalPort is stuck; using port $fixedPort instead. Use the URL printed below (and note the port)."
             $openUrl = "http://${HostAddress}:$fixedPort/"
             $apiUrl = "http://${HostAddress}:$fixedPort/api/apps"
         }
@@ -367,26 +517,6 @@ function Start-Foreground([int]$fixedPort, [bool]$useReload) {
 
     Write-Output "Starting workbench at $openUrl"
     Start-OpenWhenReadyJob -apiUrl $apiUrl -homeUrl $openUrl -timeoutSeconds $OpenTimeoutSeconds
-
-    # Write last.json so stop/restart can find this process reliably.
-    $logDir = Join-Path $root "out\\launcher"
-    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-    $lastFile = Join-Path $logDir "last.json"
-
-    # Uvicorn runs in-process (foreground) — record current PID as proxy.
-    # On --reload, uvicorn spawns a child; PID here is the parent watcher, which
-    # when killed takes the worker with it.
-    try {
-        $obj = @{
-            pid       = $PID
-            port      = $fixedPort
-            url       = $openUrl
-            startedAt = (Get-Date).ToUniversalTime().ToString('o')
-            mode      = if ($useReload) { 'dev' } else { 'serve' }
-        }
-        ($obj | ConvertTo-Json -Depth 4) | Set-Content -Encoding UTF8 -Path $lastFile
-    }
-    catch { }
 
     if ($useReload) {
         & $pythonExe -m uvicorn server:app --reload --host $HostAddress --port $fixedPort --log-level info
@@ -421,11 +551,21 @@ switch ($Mode) {
         exit 0
     }
     'dev' {
-        Start-Foreground -fixedPort $Port -useReload $true
+        if ($Detached) {
+            Start-Detached -fixedPort $Port -useReload $true
+        }
+        else {
+            Start-Foreground -fixedPort $Port -useReload $true
+        }
         exit 0
     }
     'serve' {
-        Start-Foreground -fixedPort $Port -useReload $false
+        if ($Detached) {
+            Start-Detached -fixedPort $Port -useReload $false
+        }
+        else {
+            Start-Foreground -fixedPort $Port -useReload $false
+        }
         exit 0
     }
     default {

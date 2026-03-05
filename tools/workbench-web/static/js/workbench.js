@@ -36,6 +36,40 @@ async function api(path, opts) {
   return res;
 }
 
+function shortSha(sha) {
+  const s = String(sha || '').trim();
+  return s.length >= 8 ? s.slice(0, 8) : s;
+}
+
+function setServerInfoText(text) {
+  const el = document.getElementById('serverInfo');
+  if (!el) return;
+  el.textContent = text || '';
+}
+
+async function loadServerInfo() {
+  // Always show origin (includes port) so it's obvious which backend the UI hits.
+  const origin = String(window.location.origin || '').trim();
+  setServerInfoText(origin);
+
+  try {
+    const info = await (await api('/api/info')).json();
+    const pid = info && info.pid ? String(info.pid) : '';
+    const startedAt = info && info.startedAt ? String(info.startedAt) : '';
+    const sha = info && info.gitSha ? shortSha(info.gitSha) : '';
+
+    const bits = [];
+    if (info && info.origin) bits.push(String(info.origin));
+    else if (origin) bits.push(origin);
+    if (pid) bits.push(`pid=${pid}`);
+    if (sha) bits.push(`sha=${sha}`);
+    if (startedAt) bits.push(startedAt);
+    setServerInfoText(bits.join(' | '));
+  } catch (_) {
+    // Keep origin-only display on failure.
+  }
+}
+
 function esc(s) {
   return (s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
@@ -126,8 +160,12 @@ function refreshAiTargetKeys() {
 
   const mode = document.getElementById('modeSelect').value;
   const defaultKey = MODE_TO_PROMPT_KEY[mode] || (keys[0] || '');
+  const modePrefix = (defaultKey || '').replace('System', '');
 
-  if (prev && keys.includes(prev)) {
+  // Only restore the previous key if it belongs to the current mode (i.e. same prefix).
+  // Otherwise always snap to the mode's default — prevents opener's key bleeding into app_chat etc.
+  const prevBelongsToMode = prev && modePrefix && prev.startsWith(modePrefix);
+  if (prevBelongsToMode && keys.includes(prev)) {
     sel.value = prev;
   } else if (defaultKey && keys.includes(defaultKey)) {
     sel.value = defaultKey;
@@ -196,12 +234,38 @@ async function refreshDrafts() {
   latestSuite = res.latestSuite || null;
   latestSuiteIsClean = res.latestSuiteIsClean === true;
 
+  const PROMPT_LABELS = {
+    openerSystem: 'Opener — System Prompt',
+    appChatSystem: 'App Chat — System Prompt',
+    regChatSystem: 'Reg Chat — System Prompt',
+    openerUser: 'Opener — User Template',
+    appChatUser: 'App Chat — User Template',
+    regChatUser: 'Reg Chat — User Template',
+  };
+
+  function inferModeFromTargetKey(tk) {
+    const t = String(tk || '');
+    if (t.startsWith('opener')) return 'opener';
+    if (t.startsWith('appChat')) return 'app_chat';
+    if (t.startsWith('regChat')) return 'reg_chat';
+    return '';
+  }
+  function modeForVersion(v) {
+    if (!v) return '';
+    const m = String(v.mode || '').trim();
+    if (m) return m;
+    if (v.targetKey) return inferModeFromTargetKey(v.targetKey);
+    const r = String(v.reason || '');
+    if (r.startsWith('apply:')) return inferModeFromTargetKey(r.slice('apply:'.length));
+    return '';
+  }
+
   // Filter to only snapshots matching the current mode (opener / app_chat / reg_chat).
   const currentMode = document.getElementById('modeSelect').value;
-  const modePrefix = (MODE_TO_PROMPT_KEY[currentMode] || '').replace('System', '');
-  const visibleVersions = modePrefix
-    ? draftVersions.filter(v => !v.targetKey || String(v.targetKey).startsWith(modePrefix))
-    : draftVersions;
+  const visibleVersions = draftVersions.filter(v => {
+    const vm = modeForVersion(v);
+    return !vm || vm === currentMode;
+  });
 
   sel.innerHTML = '';
   const opt0 = document.createElement('option');
@@ -216,6 +280,7 @@ async function refreshDrafts() {
     const req = v.changeRequest ? String(v.changeRequest).trim() : '';
     const key = v.targetKey ? String(v.targetKey) : '';
     const reason = v.reason ? String(v.reason) : '';
+    const vMode = modeForVersion(v);
     // Format timestamp as "Mar 2, 5:10 AM"
     let dateStr = '';
     try {
@@ -224,9 +289,14 @@ async function refreshDrafts() {
         dateStr = dt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
       }
     } catch (_) { dateStr = when.slice(0, 16); }
-    // Use changeRequest as the label when available, fall back to key name
-    const rawLabel = req || (key ? `Edited ${key}` : reason);
-    const shortLabel = rawLabel.length > 55 ? rawLabel.slice(0, 52) + '\u2026' : rawLabel;
+
+    const modeTag = vMode ? `[${vMode}] ` : '';
+    const promptTag = key ? ` (${PROMPT_LABELS[key] || key})` : '';
+
+    // Use changeRequest as the label when available, fall back to key name.
+    // Always include mode + prompt label so entries are clearly identifiable.
+    const rawLabel = modeTag + (req || (key ? `Edited ${key}` : reason)) + promptTag;
+    const shortLabel = rawLabel.length > 70 ? rawLabel.slice(0, 67) + '\u2026' : rawLabel;
     opt.textContent = dateStr ? `${dateStr} \u2014 ${shortLabel}` : shortLabel;
     sel.appendChild(opt);
   }
@@ -270,14 +340,15 @@ async function onDraftSelected() {
     return;
   }
 
-  const targetKey = document.getElementById('aiTargetKey').value;
-  if (!targetKey) return;
-
   try {
-    const d = await (await api('/api/drafts/diff?appId=' + encodeURIComponent(appId) + '&id=' + encodeURIComponent(id) + '&targetKey=' + encodeURIComponent(targetKey))).json();
-    document.getElementById('aiDiffAdv').textContent = d.diff || '';
-
     const ver = (draftVersions || []).find(x => x && x.id === id) || null;
+    const verTargetKey = ver && ver.targetKey ? String(ver.targetKey) : '';
+    const fallbackTargetKey = document.getElementById('aiTargetKey').value;
+    const targetKeyToDiff = verTargetKey || fallbackTargetKey;
+    if (!targetKeyToDiff) return;
+
+    const d = await (await api('/api/drafts/diff?appId=' + encodeURIComponent(appId) + '&id=' + encodeURIComponent(id) + '&targetKey=' + encodeURIComponent(targetKeyToDiff))).json();
+    document.getElementById('aiDiffAdv').textContent = d.diff || '';
 
     const PROMPT_LABELS = {
       openerSystem: 'Opener \u2014 System Prompt',
@@ -298,7 +369,7 @@ async function onDraftSelected() {
     }
 
     // 2. Which prompt was changed
-    const tk = ver && ver.targetKey ? String(ver.targetKey) : '';
+    const tk = verTargetKey;
     notes.push('Prompt: ' + (PROMPT_LABELS[tk] || tk || 'unknown'));
 
     // 3. When it was saved
@@ -457,9 +528,11 @@ async function aiApply() {
   document.getElementById('aiError').textContent = '';
 
   const appId = document.getElementById('appSelect').value;
+  const mode = document.getElementById('modeSelect').value;
   const model = document.getElementById('modelSelect').value;
   const payload = {
     appId,
+    mode,
     model,
     changeRequest: (document.getElementById('aiChangeRequest').value || '').trim(),
     notes: aiNotesFromProposal(proposal),
@@ -480,7 +553,6 @@ async function aiApply() {
   const stored = (cand && cand.prompts && typeof cand.prompts === 'object') ? cand.prompts[proposal.targetKey] : null;
   const verified = (typeof stored === 'string') && (stored === proposal.updatedText);
 
-  const mode = document.getElementById('modeSelect').value;
   const visibleSystemKey = MODE_TO_PROMPT_KEY[mode];
   const visibleUserKey = MODE_TO_USER_TEMPLATE_KEY[mode];
   const visibleHint = (proposal.targetKey === visibleSystemKey || proposal.targetKey === visibleUserKey)
@@ -985,3 +1057,5 @@ document.getElementById('aiChangeRequest').addEventListener('keydown', (e) => {
 loadApps().catch(e => {
   document.getElementById('status').textContent = 'Error: ' + e.message;
 });
+
+loadServerInfo().catch(() => { });

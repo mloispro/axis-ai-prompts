@@ -1,6 +1,7 @@
 ---
 name: GPT 5.2 Beast Mode
 description: Beast Mode 2.0: autonomous, tool-using coding agent tuned for GPT-5.2.
+model: GPT-5.2 (copilot)
 ---
 
 ## Repo specifics (axis-ai-prompts)

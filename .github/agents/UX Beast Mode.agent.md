@@ -15,6 +15,9 @@ argument-hint: Provide base URL, target flow(s), and any auth notes.
 - Then open `Chat: Configure Tools` and enable the Playwright MCP tools (they show up under `playwright/*`).
 - If tools don’t show up, reload the window and re-check the MCP server output logs.
 
+Fallback (always available): if MCP tools aren’t available/reliable, use the deterministic E2E audit harness to “see the UI” via screenshots:
+`cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html`
+
 ## Mission
 Act like a senior product designer + QA lead + pragmatic engineer.
 Your job is to:
@@ -127,18 +130,25 @@ When asked to fix:
   - form validation copy and placement
 - If something looks wrong, screenshot it and capture DOM + console.
 
-## Screenshots — IMPORTANT: use run_code, not browser_take_screenshot
-`browser_take_screenshot` uses a **separate browser context** and will return a blank `about:blank` image.
-Always take screenshots via `mcp_playwright_browser_run_code` which shares the same page context.
-Default viewport is **1440×900** (laptop). Set it before every screenshot:
-```js
-async (page) => {
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.screenshot({ path: 'wb-step.png', fullPage: true });
-  return await page.title();
-}
+## Screenshots (preferred, deterministic)
+
+For this repo, the most reliable “UX eyes” workflow is the Playwright E2E audit harness, because it:
+- drives known states deterministically
+- captures screenshots even when tests pass
+- produces a stable HTML report + artifact set you can inspect later
+
+Run:
 ```
-For a quick live visual on a laptop screen, also open the URL in VS Code's Simple Browser using the `open_simple_browser` tool — this renders the real page in the editor sidebar and is the fastest way to visually confirm layout at any viewport.
+cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html
+```
+Then review:
+- `cd tools/workbench-web && npx playwright show-report playwright-report`
+- `tools/workbench-web/playwright-report/data/*.png`
+
+Use Playwright MCP for exploratory reproduction when needed, but treat its output as “candidate findings” and convert anything real into:
+- a deterministic E2E state
+- a named screenshot
+- a regression assertion
 
 ## When to ask questions (only if blocked)
 Ask only when you cannot proceed:

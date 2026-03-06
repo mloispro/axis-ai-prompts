@@ -23,6 +23,14 @@ cd tools/workbench-web && npx playwright test --reporter=line
 ```
 Tests use `dryRun: true` — no OpenAI key needed. All 6 must pass before shipping.
 
+For UI/UX work (to “see the UI” deterministically), prefer an audit run that captures screenshots even when tests pass:
+```
+cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html
+```
+Then review:
+- `cd tools/workbench-web && npx playwright show-report playwright-report`
+- `tools/workbench-web/playwright-report/data/*.png`
+
 **History model invariants (critical — break these and tests fail):**
 - `api/edit/apply` always pushes `{ kind:"undo" }` then `{ kind:"draft" }` as adjacent pairs.
 - `api/edit/reset` wipes history entirely (`_write_history(appId, [])`). No reset snapshot.

@@ -98,12 +98,31 @@ misleads users. Do not reintroduce a red or pink hue into the cycle.
 
 #### Web workbench — e2e tests
 
-- Tests live in `tools/workbench-web/e2e/workbench.spec.js` (Playwright, 6 tests).
+- Tests live in `tools/workbench-web/e2e/specs/*.spec.js` with shared harness in `tools/workbench-web/e2e/helpers/workbenchTest.js`.
 - Run from `tools/workbench-web/`: `npx playwright test --reporter=line`
 - Tests use `dryRun: true` — no OpenAI API key required.
-- Test 5 is self-sufficient: it creates its own draft via dry-run apply, tests preview bar behavior, then resets.
+- The suite includes a self-sufficient preview-mode spec that creates its own draft via dry-run apply, tests preview-bar behavior, then resets.
 - After running tests the history file may be cleared; that is expected and intentional.
 - Always run tests after editing `server.py`, `workbench.js`, `workbench.css`, or `index.html`.
+
+Stability note (Windows): the workbench mutates local state files (candidate/history). The Playwright config uses `workers: 1` to avoid file-lock contention when running split specs.
+
+#### Web workbench — UI audit workflow (how to “see the UI”)
+
+Use Playwright E2E as a deterministic “UI camera”:
+
+1) Ensure the web workbench is running (default: `http://127.0.0.1:7540/`).
+  - Prefer VS Code task: `Workbench: Start`
+2) Run an audit pass that captures screenshots even when tests pass:
+  - `cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html`
+3) Review artifacts:
+  - HTML report UI: `cd tools/workbench-web && npx playwright show-report playwright-report`
+  - Raw attachments: `tools/workbench-web/playwright-report/data/*.png`
+
+Turn a visual finding into a durable fix:
+- Add/adjust the smallest code/CSS change that addresses the root cause.
+- Add a Playwright assertion in the spec that produces the screenshot for that state.
+- Re-run the same audit command and confirm the screenshot/state is corrected.
 
 ## Common dev commands (Windows)
 - Run workbench selftest (no API calls):

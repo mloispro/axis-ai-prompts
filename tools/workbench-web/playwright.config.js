@@ -1,7 +1,7 @@
 // @ts-check
 const { defineConfig } = require('playwright/test');
 
-const port = String(process.env.WORKBENCH_PORT || '8787');
+const port = String(process.env.WORKBENCH_PORT || '7540');
 
 module.exports = defineConfig({
     testDir: './e2e',

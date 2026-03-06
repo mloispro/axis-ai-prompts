@@ -5,7 +5,7 @@
       "name": "▶ Workbench",
       "type": "node-terminal",
       "request": "launch",
-      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/tools/workbench-web/launcher.ps1\" -Mode serve -Port 7540 -RestartOnPortInUse -NoPortDrift"
+      "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"${workspaceFolder}/tools/workbench-web/launcher.ps1\" -Mode dev -Port 7540 -Restart -NoPortDrift -Detached"
     },
     {
       "name": "🐞 Workbench: Debug (fixed 7540)",

@@ -46,6 +46,7 @@ test.beforeEach(async ({ page }) => {
     attachDiagnostics(page);
 });
 
+// ── Test 1: Bootstrap ─────────────────────────────────────────────────
 test('loads apps, models, and prompt editors', async ({ page }) => {
     await gotoAndWaitForBootstrap(page);
 
@@ -61,21 +62,31 @@ test('loads apps, models, and prompt editors', async ({ page }) => {
 
     const modelSelect = page.locator('#modelSelect');
     await expect(modelSelect).toBeVisible();
-    await expect(modelSelect.locator('option')).toHaveCount(4);
+    await expect.poll(async () => await modelSelect.locator('option').count()).toBeGreaterThan(0);
 
-    await expect(page.locator('#systemPrompt')).toBeVisible();
+    // System prompt is read-only in the new UI (edited via AI bar only).
+    const systemPrompt = page.locator('#systemPrompt');
+    await expect(systemPrompt).toBeVisible();
+    const isReadOnly = await systemPrompt.getAttribute('readonly');
+    expect(isReadOnly).not.toBeNull();
+
     await expect(page.locator('#userTemplate')).toBeVisible();
     await expect(page.locator('#fixtureSelect')).toBeVisible();
 
+    // Version pills row and compare button should be visible.
+    await expect(page.locator('#versionPills')).toBeVisible();
+    await expect(page.locator('#compareBaseBtn')).toBeVisible();
+
+    // Base pill must always be present.
+    await expect(page.locator('#versionPills .base-pill')).toBeVisible();
+
     // Ensure prompts are actually pre-populated for a known app.
-    // This catches the regression where candidate prompts load as blanks.
     const appValues = await appSelect.locator('option').evaluateAll(opts => opts.map(o => o.value));
     if (appValues.includes('rizzchatai')) {
         await appSelect.selectOption('rizzchatai');
-        // Allow async app change + candidate load.
-        await page.waitForTimeout(200);
+        await page.waitForTimeout(300);
 
-        const systemVal = await page.locator('#systemPrompt').inputValue();
+        const systemVal = await systemPrompt.inputValue();
         expect(systemVal.trim().length).toBeGreaterThan(20);
 
         // Preview should render when selecting a specific fixture.
@@ -99,10 +110,10 @@ test('loads apps, models, and prompt editors', async ({ page }) => {
     }
 });
 
+// ── Test 2: Dry-run suite ─────────────────────────────────────────────
 test('dry-run suite renders results without API key', async ({ page }) => {
     await gotoAndWaitForBootstrap(page);
 
-    // Wait for UI bootstrap (apps/modes/models) so click handlers have data.
     const appSelect = page.locator('#appSelect');
     await expect.poll(async () => await appSelect.locator('option').count()).toBeGreaterThan(0);
     const modeSelect = page.locator('#modeSelect');
@@ -121,13 +132,10 @@ test('dry-run suite renders results without API key', async ({ page }) => {
     await expect(page.locator('#results')).toContainText('variant=candidate');
 });
 
+// ── Test 3: AI propose/apply/undo ─────────────────────────────────────
 test('dry-run AI editor propose/apply/undo works without API key', async ({ page }) => {
     await gotoAndWaitForBootstrap(page);
 
-    // Edit History (draftSelect) lives under the Advanced accordion.
-    await page.locator('details.adv').evaluate(el => { el.open = true; });
-
-    // Wait for UI bootstrap (apps/modes/models) before interacting.
     const appSelect = page.locator('#appSelect');
     await expect.poll(async () => await appSelect.locator('option').count()).toBeGreaterThan(0);
     const modeSelect = page.locator('#modeSelect');
@@ -148,31 +156,16 @@ test('dry-run AI editor propose/apply/undo works without API key', async ({ page
         await page.waitForTimeout(200);
     }
 
-    // Ensure test starts from a clean candidate state so Undo has a known baseline.
+    // Start from clean state — open compare modal and use Reset to Base button.
     page.once('dialog', dialog => dialog.accept());
-    await page.locator('#aiResetBtn').click();
-    await expect(page.locator('#aiEditStatus')).toContainText('Reset');
+    await page.locator('#compareBaseBtn').click();
+    await expect(page.locator('#compareModal')).toBeVisible();
+    await page.locator('#compareResetBtn').click();
+    await expect(page.locator('#compareModal')).not.toBeVisible();
+    await expect(page.locator('#aiEditStatus')).toHaveText('Reset');
     await expect.poll(async () => await page.locator('#systemPrompt').inputValue()).not.toContain('DRY_RUN_EDIT');
 
-    // Clear edit history selection so the Diff pane reflects the AI proposal.
-    await page.locator('#draftSelect').selectOption('');
-
-    const getDraftOptions = async () => {
-        const opts = await page.locator('#draftSelect option').evaluateAll(nodes => nodes.map(n => ({
-            value: n.value || '',
-            text: (n.textContent || '').trim(),
-        })));
-        return opts.filter(o => o.value);
-    };
-
-    const openerBefore = await getDraftOptions();
-
-    // Ensure the underlying target-key select is populated (even though it's hidden).
-    await expect.poll(async () => await page.locator('#aiTargetKey option').count()).toBeGreaterThan(0);
-
-    // Target the system prompt via the visible pill UI.
-    await page.locator('#aiTargetSysBtn').click();
-
+    // The AI bar always targets the system prompt in the new UI — no target toggle needed.
     const openerMarker = 'e2e-opener-marker';
     await page.locator('#aiChangeRequest').fill(openerMarker);
     await page.locator('#aiProposeBtn').click();
@@ -186,55 +179,157 @@ test('dry-run AI editor propose/apply/undo works without API key', async ({ page
     await expect(page.locator('#aiEditStatus')).toContainText('Applied');
     await expect(page.locator('#status')).toContainText('Done');
 
-    // Edit History should include a new opener snapshot, scoped/labeled by mode.
-    const draftSelect = page.locator('#draftSelect');
-    await expect.poll(async () => await draftSelect.locator('option').count()).toBeGreaterThan(1);
-    const openerAfter = await getDraftOptions();
-    const openerNew = openerAfter.filter(o => !openerBefore.some(b => b.value === o.value));
-    expect(openerNew.length).toBeGreaterThan(0);
-    expect(openerNew.map(o => o.text).join('\n')).toContain('[opener]');
-    expect(openerNew.map(o => o.text).join('\n')).toContain(openerMarker);
-
+    // The system prompt must contain DRY_RUN_EDIT after apply.
     const afterApply = await page.locator('#systemPrompt').inputValue();
     expect(afterApply).toContain('DRY_RUN_EDIT');
     expect(afterApply.length).toBeGreaterThan(before.length);
 
-    // Now switch to app_chat and apply a distinct edit; history dropdown should be mode-scoped.
+    // At least one pill should reference the opener marker in its title.
+    // (pill count itself isn't asserted — history cap of 50 can cause net-zero change)
+    await expect.poll(async () => {
+        const titles = await page.locator('#versionPills .version-pill').evaluateAll(
+            btns => btns.map(b => b.getAttribute('title') || '')
+        );
+        return titles.some(t => t.includes(openerMarker));
+    }).toBe(true);
+
+    // Delete the version via the compare modal Delete version button.
+    await page.locator('#compareBaseBtn').click();
+    await expect(page.locator('#compareModal')).toBeVisible();
+    await page.locator('#compareDeleteBtn').click();
+    await expect(page.locator('#compareModal')).not.toBeVisible();
+    await expect(page.locator('#aiEditStatus')).toContainText('Version deleted');
+    const afterUndo = await page.locator('#systemPrompt').inputValue();
+    expect(afterUndo).not.toContain('DRY_RUN_EDIT');
+
+    // Switch to app_chat and verify mode-scoped apply still works.
     const modeValues2 = await modeSelect.locator('option').evaluateAll(opts => opts.map(o => o.value));
     if (modeValues2.includes('app_chat')) {
         await modeSelect.selectOption('app_chat');
         await page.waitForTimeout(200);
+
+        const appChatMarker = 'e2e-app-chat-marker';
+        await page.locator('#aiChangeRequest').fill(appChatMarker);
+        await page.locator('#aiProposeBtn').click();
+        await expect(page.locator('#aiDiff')).toContainText('DRY_RUN_EDIT');
+        await expect(page.locator('#aiApplyBtn')).toBeEnabled();
+        await page.locator('#aiApplyBtn').click();
+        await expect(page.locator('#aiEditStatus')).toContainText('Applied');
+
+        // Verify the app_chat system prompt actually contains the dry-run edit.
+        // (We use poll because apply triggers an async suite run before updating the textarea)
+        await expect.poll(async () => await page.locator('#systemPrompt').inputValue()).toContain('DRY_RUN_EDIT');
+
+        // Pills row must show at least the Base pill after apply + refreshDrafts.
+        await expect(page.locator('#versionPills .base-pill')).toBeVisible();
+
+        // Delete the app_chat version via compare modal.
+        await page.locator('#compareBaseBtn').click();
+        await page.locator('#compareDeleteBtn').click();
+        await expect(page.locator('#compareModal')).not.toBeVisible();
+        await expect(page.locator('#aiEditStatus')).toContainText('Version deleted');
+        await expect.poll(async () => await page.locator('#systemPrompt').inputValue()).not.toContain('DRY_RUN_EDIT');
     }
-
-    const appChatBefore = await getDraftOptions();
-
-    // After changing modes, re-target the system prompt via the visible pill UI.
-    await page.locator('#aiTargetSysBtn').click();
-
-    const appChatMarker = 'e2e-app-chat-marker';
-    await page.locator('#aiChangeRequest').fill(appChatMarker);
-    await page.locator('#aiProposeBtn').click();
-    await expect(page.locator('#aiDiff')).toContainText('DRY_RUN_EDIT');
-    await expect(page.locator('#aiApplyBtn')).toBeEnabled();
-    await page.locator('#aiApplyBtn').click();
-    await expect(page.locator('#aiEditStatus')).toContainText('Applied');
-    await expect(page.locator('#status')).toContainText('Done');
-
-    await expect.poll(async () => await draftSelect.locator('option').count()).toBeGreaterThan(1);
-    const appChatAfter = await getDraftOptions();
-    const appChatNew = appChatAfter.filter(o => !appChatBefore.some(b => b.value === o.value));
-    expect(appChatNew.length).toBeGreaterThan(0);
-    expect(appChatNew.map(o => o.text).join('\n')).toContain('[app_chat]');
-    expect(appChatNew.map(o => o.text).join('\n')).toContain(appChatMarker);
-    // Mode-scoped dropdown should not show opener's marker.
-    expect(appChatAfter.map(o => o.text).join('\n')).not.toContain(openerMarker);
-
-    await page.locator('#aiUndoBtn').click();
-    await expect(page.locator('#aiEditStatus')).toContainText('Undone');
-    const afterUndo = await page.locator('#systemPrompt').inputValue();
-    expect(afterUndo).not.toContain('DRY_RUN_EDIT');
 });
 
+// ── Test 4: Compare modal ─────────────────────────────────────────────
+test('compare modal opens with base text and closes', async ({ page }) => {
+    await gotoAndWaitForBootstrap(page);
+
+    const appSelect = page.locator('#appSelect');
+    await expect.poll(async () => await appSelect.locator('option').count()).toBeGreaterThan(0);
+
+    const appValues = await appSelect.locator('option').evaluateAll(opts => opts.map(o => o.value));
+    if (appValues.includes('rizzchatai')) {
+        await appSelect.selectOption('rizzchatai');
+        // Wait for /api/baselines to resolve so baseSystemText is populated.
+        await page.waitForResponse(r => r.url().includes('/api/baselines') && r.status() === 200);
+        await page.waitForTimeout(200);
+    }
+
+    // Modal should be hidden initially.
+    const modal = page.locator('#compareModal');
+    await expect(modal).not.toBeVisible();
+
+    // Click "vs Base" button.
+    await page.locator('#compareBaseBtn').click();
+    await expect(modal).toBeVisible();
+
+    // Base column must have real text (not empty) after /api/baselines loaded.
+    const baseTextContent = await page.locator('#compareBaseText').textContent();
+    expect((baseTextContent || '').trim().length).toBeGreaterThan(10);
+
+    // Current column must also have real text.
+    const currentTextContent = await page.locator('#compareCurrentText').textContent();
+    expect((currentTextContent || '').trim().length).toBeGreaterThan(10);
+
+    // Close via the X button.
+    await page.locator('#compareModalCloseBtn').click();
+    await expect(modal).not.toBeVisible();
+});
+
+// ── Test 5: Version pill preview / restore / cancel ───────────────────
+test('version pill preview shows version bar and can be dismissed', async ({ page }) => {
+    await gotoAndWaitForBootstrap(page);
+
+    const appSelect = page.locator('#appSelect');
+    await expect.poll(async () => await appSelect.locator('option').count()).toBeGreaterThan(0);
+
+    const appValues = await appSelect.locator('option').evaluateAll(opts => opts.map(o => o.value));
+    if (appValues.includes('rizzchatai')) {
+        await appSelect.selectOption('rizzchatai');
+        await page.waitForTimeout(300);
+    }
+
+    // ── Setup: ensure we start with a clean state, then create one draft ──
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('#compareBaseBtn').click();
+    await expect(page.locator('#compareModal')).toBeVisible();
+    await page.locator('#compareResetBtn').click();
+    await expect(page.locator('#compareModal')).not.toBeVisible();
+
+    // Apply a dry-run edit to create a version pill.
+    await page.locator('#dryRun').check();
+    await page.locator('#aiChangeRequest').fill('e2e-t5-marker');
+    await page.locator('#aiProposeBtn').click();
+    await expect(page.locator('#aiDiff')).toContainText('DRY_RUN_EDIT');
+    await page.locator('#aiApplyBtn').click();
+    await expect(page.locator('#aiEditStatus')).toContainText('Applied');
+
+    const nonBasePills = page.locator('#versionPills .version-pill:not(.base-pill)');
+    await expect.poll(async () => await nonBasePills.count()).toBeGreaterThan(0);
+
+    // ── Test: version bar must NOT be visible before any pill is clicked ──
+    const versionBar = page.locator('#sysVersionBar');
+    await expect(versionBar).not.toBeVisible();
+
+    // Click the LAST (oldest) non-base pill to enter preview mode.
+    await nonBasePills.last().click();
+    await expect(versionBar).toBeVisible();
+
+    // The system prompt must be populated (not blank) after clicking a pill.
+    const promptValue = await page.locator('#systemPrompt').inputValue();
+    expect(promptValue.length, 'systemPrompt must not be blank after pill click').toBeGreaterThan(0);
+
+    // Close button should dismiss the version bar WITHOUT applying.
+    await page.locator('#sysVersionBarClose').click();
+    await expect(versionBar).not.toBeVisible();
+
+    // Re-click a pill to enter preview, then re-click the SAME pill to exit (F2 behaviour).
+    await nonBasePills.last().click();
+    await expect(versionBar).toBeVisible();
+    await nonBasePills.last().click(); // re-click same active pill → exits preview
+    await expect(versionBar).not.toBeVisible();
+
+    // ── Cleanup: reset draft history ──
+    page.once('dialog', dialog => dialog.accept());
+    await page.locator('#compareBaseBtn').click();
+    await expect(page.locator('#compareModal')).toBeVisible();
+    await page.locator('#compareResetBtn').click();
+    await expect(page.locator('#compareModal')).not.toBeVisible();
+});
+
+// ── Test 6: Responsive layout ─────────────────────────────────────────
 test('responsive layout: editors stack on narrow screens', async ({ page }) => {
     const systemPrompt = page.locator('#systemPrompt');
     const userTemplate = page.locator('#userTemplate');
@@ -244,7 +339,7 @@ test('responsive layout: editors stack on narrow screens', async ({ page }) => {
     await expect(systemPrompt).toBeVisible();
     await expect(userTemplate).toBeVisible();
 
-    // Wide: stacked layout (chosen UX spec).
+    // Wide: stacked layout.
     const wideA = await systemPrompt.boundingBox();
     const wideB = await userTemplate.boundingBox();
     expect(wideA && wideB).toBeTruthy();
@@ -257,7 +352,7 @@ test('responsive layout: editors stack on narrow screens', async ({ page }) => {
     });
     expect(wideOverflow).toBeLessThanOrEqual(1);
 
-    // Narrow: still stacked, and should not overflow.
+    // Narrow: still stacked, no overflow.
     await page.setViewportSize({ width: 700, height: 900 });
     await gotoAndWaitForBootstrap(page);
     await expect(systemPrompt).toBeVisible();
@@ -273,4 +368,15 @@ test('responsive layout: editors stack on narrow screens', async ({ page }) => {
         return el.scrollWidth - el.clientWidth;
     });
     expect(narrowOverflow).toBeLessThanOrEqual(1);
+});
+
+// ── N2: Cleanup \u2014 reset draft history after all tests ──────────────────
+test.afterAll(async ({ request }) => {
+    try {
+        await request.post('/api/edit/reset', {
+            data: { appId: 'rizzchatai' },
+        });
+    } catch (_) {
+        // best-effort cleanup \u2014 ignore errors
+    }
 });

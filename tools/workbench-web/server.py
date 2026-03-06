@@ -746,20 +746,26 @@ def _list_fixture_files(*, app_id: str, mode: str) -> List[Dict[str, Any]]:
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(str(STATIC_DIR / "index.html"))
+    return FileResponse(
+        str(STATIC_DIR / "index.html"), headers={"Cache-Control": "no-store"}
+    )
 
 
 @app.get("/css/workbench.css")
 def serve_css() -> FileResponse:
     return FileResponse(
-        str(STATIC_DIR / "css" / "workbench.css"), media_type="text/css"
+        str(STATIC_DIR / "css" / "workbench.css"),
+        media_type="text/css",
+        headers={"Cache-Control": "no-store"},
     )
 
 
 @app.get("/js/workbench.js")
 def serve_js() -> FileResponse:
     return FileResponse(
-        str(STATIC_DIR / "js" / "workbench.js"), media_type="application/javascript"
+        str(STATIC_DIR / "js" / "workbench.js"),
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -864,6 +870,36 @@ def api_compose(payload: Dict[str, Any]) -> JSONResponse:
             "baseline": {"system": baseline_system, "user": baseline_user},
             "candidate": {"system": candidate_system, "user": candidate_user},
         }
+    )
+
+
+@app.get("/api/baselines")
+def api_baselines(appId: str = "") -> JSONResponse:
+    """Return the canonical (published) prompts for an app.
+
+    Used by the workbench UI to populate the compare modal's Base column.
+    Falls back to the state/baselines/<appId>.json override if it exists,
+    otherwise reads from prompts/<appId>.json (the canonical source).
+    """
+    app_id = (appId or "").strip() or _default_app_id()
+    cfg = _get_app(app_id)
+
+    # Prefer local baseline override if present.
+    baseline_override = _baseline_path(app_id)
+    if baseline_override.exists():
+        obj = _read_json(baseline_override)
+        if isinstance(obj, dict) and "prompts" in obj:
+            return JSONResponse(obj)
+
+    # Fall back to the canonical prompts file.
+    canonical_path = Path(str(cfg.get("defaultPromptsPath") or ""))
+    if canonical_path.exists():
+        obj = _read_json(canonical_path)
+        if isinstance(obj, dict):
+            return JSONResponse(obj)
+
+    raise HTTPException(
+        status_code=404, detail=f"No baseline found for appId={app_id!r}"
     )
 
 
@@ -1217,17 +1253,81 @@ def api_edit_reset(payload: Dict[str, Any]) -> JSONResponse:
     candidate_path = _candidate_path(app_id)
 
     if candidate_path.exists():
-        try:
-            cand_obj = _read_json(candidate_path)
-            _push_undo_snapshot(app_id, cand_obj, reason="reset")
-            _push_draft_version(app_id, cand_obj, reason="reset")
-        except Exception:
-            pass
         candidate_path.unlink(missing_ok=True)
+
+    # Clear history entirely so the draft shelf starts fresh.
+    _write_history(app_id, [])
 
     # Start fresh from canonical via existing getter.
     _ = api_get_candidate(appId=app_id)
 
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/drafts/delete")
+def api_drafts_delete(payload: Dict[str, Any]) -> JSONResponse:
+    """Delete a specific draft version by id and restore to the previous apply: state."""
+    _ensure_state_dirs()
+    app_id = (payload.get("appId") or "").strip() or _default_app_id()
+    draft_id = (payload.get("id") or "").strip()
+    if not draft_id:
+        raise HTTPException(status_code=400, detail="id is required")
+
+    candidate_path = _candidate_path(app_id)
+    items = _read_history(app_id)
+
+    # Find the target draft entry by id.
+    target_idx: Optional[int] = None
+    for i, it in enumerate(items):
+        if (
+            isinstance(it, dict)
+            and str(it.get("kind") or "") == "draft"
+            and str(it.get("id") or "") == draft_id
+        ):
+            target_idx = i
+            break
+
+    if target_idx is None:
+        raise HTTPException(status_code=404, detail="Draft version not found")
+
+    # Find the paired undo snapshot immediately preceding the draft.
+    # apply always pushes undo then draft as adjacent entries.
+    undo_idx: Optional[int] = None
+    if target_idx > 0:
+        prev = items[target_idx - 1]
+        if isinstance(prev, dict) and str(prev.get("kind") or "") == "undo":
+            undo_idx = target_idx - 1
+
+    # Remove both entries from history.
+    indices_to_remove = {i for i in [target_idx, undo_idx] if i is not None}
+    new_items = [it for i, it in enumerate(items) if i not in indices_to_remove]
+
+    # Find the most recent apply: draft before the deleted entry to restore to.
+    # Only apply: drafts represent real user edits; skip reset/other entries.
+    restore_cand: Optional[Dict[str, Any]] = None
+    for i in range(target_idx - 1, -1, -1):
+        it = items[i]
+        if (
+            isinstance(it, dict)
+            and str(it.get("kind") or "") == "draft"
+            and str(it.get("reason") or "").startswith("apply:")
+        ):
+            cand_obj = it.get("candidate")
+            if isinstance(cand_obj, dict):
+                restore_cand = cand_obj
+                break
+
+    if restore_cand is not None:
+        raw_bytes = json.dumps(restore_cand).encode("utf-8")
+        _ = engine.load_prompts_json_from_bytes(raw_bytes, source=str(candidate_path))
+        candidate_path.write_text(json.dumps(restore_cand, indent=2), encoding="utf-8")
+    else:
+        # No previous apply draft — restore to canonical base.
+        if candidate_path.exists():
+            candidate_path.unlink(missing_ok=True)
+        _ = api_get_candidate(appId=app_id)
+
+    _write_history(app_id, new_items)
     return JSONResponse({"ok": True})
 
 
@@ -1428,6 +1528,7 @@ def api_drafts_diff(appId: str = "", id: str = "", targetKey: str = "") -> JSONR
             "id": draft_id,
             "targetKey": target_key,
             "diff": diff,
+            "snapshotText": b,
             "prevSavedAt": a_at,
             "savedAt": b_at,
         }

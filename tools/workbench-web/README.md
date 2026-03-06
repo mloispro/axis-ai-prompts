@@ -61,7 +61,7 @@ API endpoints (used by the UI):
 - `POST /api/edit/propose` (supports `dryRun: true` to avoid OpenAI calls)
 - `POST /api/edit/apply`
 - `POST /api/edit/undo`
-- `POST /api/edit/reset`
+- `POST /api/edit/reset` — **also wipes history entirely** (not just candidate)
 
 ## Edit history (local snapshots)
 Each time you click **Apply**, the server stores a local-only snapshot so you can browse/diff/restore prior candidate states.
@@ -71,11 +71,15 @@ Where it lives:
 
 API endpoints:
 - `GET /api/drafts` (lists edit snapshots + includes latest suite clean/not-clean status)
-- `GET /api/drafts/diff` (unified diff for a key vs previous edit snapshot)
+- `GET /api/drafts/diff` (returns snapshot text + unified diff for a specific draft id)
 - `POST /api/drafts/restore` (restores a selected snapshot into the candidate file)
+- `POST /api/drafts/delete` (deletes one draft by id — removes the draft **and** its paired undo snapshot, then restores candidate to the previous version; or base if it was the only version)
 
-Notes:
-- Undo operations use undo snapshots and ignore draft entries, so the draft shelf won’t break Undo semantics.
+History model invariants:
+- `api/edit/apply` always pushes two entries in order: `{ kind: "undo" }` then `{ kind: "draft" }` — always adjacent/paired.
+- `api/edit/undo` pops only the most recent `kind:"undo"` entry (does not touch draft entries).
+- `api/edit/reset` **wipes the entire history file** (`[]`). There is no "reset snapshot" preserved.
+- `api/drafts/delete` removes the targeted draft AND its immediately-preceding undo snapshot.
 
 ## Promote to canonical (ship step)
 When you’re satisfied with a candidate, use **Publish to repo prompts** to write it into the repo-tracked prompt bundle:
@@ -93,6 +97,15 @@ API endpoint:
 - This repo is public. Don’t put secrets/PII in prompts or fixtures.
 - API key lives only in `tools/workbench-web/.env.local` (gitignored).
 
+## Version pill preview (diff overlay)
+
+Clicking any version pill on the main screen enters **preview mode**:
+- A colored header bar (`#sysVersionBar`) appears above the textarea, styled in the pill's hue.
+- A diff overlay (`#sysPromptDiffOverlay`) is rendered over the textarea showing added/removed lines
+  vs the canonical base — using `dl-add-hue-{n}` / `dl-del` / `dl-ctx` spans.
+- Click the `×` in the version bar, or re-click the same pill, to exit preview mode.
+- The base pill shows the base text without a diff overlay.
+
 ## Playwright e2e (no API key required)
 The Playwright tests start the server automatically and run in `dry-run` mode (no OpenAI calls).
 
@@ -102,4 +115,7 @@ From `tools/workbench-web/`:
 Or via npm:
 - Setup once: `npm run e2e:setup`
 - Run tests: `npm run e2e`
+
+After a test run the history file is cleared — this is expected.
+Always re-run after editing `server.py`, `workbench.js`, `workbench.css`, or `index.html`.
 

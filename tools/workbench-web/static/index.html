@@ -4,94 +4,110 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light" />
   <title>Prompt Workbench</title>
   <link rel="stylesheet" href="/css/workbench.css" />
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🛠</text></svg>" />
 </head>
 
 <body>
 
   <!-- ── Top Bar ── -->
-  <div class="topbar">
-    <span class="topbar-title">Prompt Workbench</span>
+  <header class="topbar">
+    <h1 class="topbar-title">Prompt Workbench</h1>
     <span class="topbar-sep">|</span>
     <div>
-      <label>App</label>
-      <select id="appSelect"></select>
+      <select id="appSelect" aria-label="App"></select>
     </div>
     <div>
-      <label>Mode</label>
-      <select id="modeSelect"></select>
+      <select id="modeSelect" aria-label="Mode"></select>
     </div>
     <div>
-      <label>Model</label>
-      <select id="modelSelect" style="min-width:240px"></select>
-      <div class="muted">Costs show input / cached input / output ($ / 1M tokens).</div>
+      <select id="modelSelect" aria-label="Model"></select>
     </div>
     <div class="check-row" style="padding-bottom:1px;">
       <input id="dryRun" type="checkbox" />
       <span class="muted">Dry run</span>
     </div>
     <div class="flex-1"></div>
-    <span id="serverInfo" class="muted"></span>
-    <span class="topbar-sep">|</span>
-    <span id="aiEditStatus" class="muted"></span>
-  </div>
+  </header>
 
   <!-- ── Main playground ── -->
-  <div class="playground">
+  <main class="playground">
 
     <!-- LEFT: Editor Panel -->
     <div class="editor-panel">
       <div class="editor-body">
 
         <!-- System Prompt -->
-        <div>
-          <div class="section-label">System Prompt</div>
-          <textarea id="systemPrompt" placeholder="System prompt…" style="min-height:260px"></textarea>
+        <div class="sys-prompt-section">
+          <div class="section-label">System Prompt <span class="section-label-hint">AI-managed · click prompt to edit
+              via AI</span></div>
+          <!-- textarea wrapper for overlay positioning -->
+          <div class="sys-prompt-wrap">
+            <!-- Version bar shown when previewing a history pill (sits above textarea) -->
+            <div id="sysVersionBar" class="sys-version-bar">
+              <span id="sysVersionBarLabel" class="sys-version-bar-label"></span>
+              <button id="sysVersionBarClose" class="sys-version-bar-close" type="button"
+                aria-label="Exit preview">✕</button>
+            </div>
+            <textarea id="systemPrompt" readonly placeholder="System prompt…" style="min-height:380px" rows="8"
+              spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+            <!-- diff overlay shown during proposal review -->
+            <pre id="sysPromptDiffOverlay" class="sys-diff-overlay" aria-hidden="true"></pre>
+          </div>
+          <!-- Version pills row -->
+          <div class="version-pills-row" id="versionPillsRow">
+            <div class="version-pills" id="versionPills">
+              <!-- pills injected by JS -->
+            </div>
+            <button class="pill-btn pill-btn--compare" id="compareBaseBtn" type="button"
+              title="Compare current vs Base">⇄ vs Base</button>
+          </div>
+        </div>
+
+        <!-- AI bar (system-prompt only, no toggle) -->
+        <div class="ai-bar-section">
+          <div class="ai-bar">
+            <div class="ai-bar-row">
+              <input class="ai-bar-input" id="aiChangeRequest" type="text" aria-label="Describe your change"
+                placeholder="Describe the change… (Enter to run)" />
+              <button class="ai-run-btn" id="aiProposeBtn" type="button" title="Propose improvement">&#9654;</button>
+            </div>
+            <div id="aiDiffWrap">
+              <div class="diff-area" id="aiDiff"></div>
+              <div class="ai-action-row">
+                <button class="btn btn-sm btn-apply" id="aiApplyBtn" type="button" disabled>Apply</button>
+                <button class="btn btn-ghost btn-sm" id="aiDiscardBtn" type="button">Discard</button>
+              </div>
+            </div>
+            <div class="ai-persistent-row">
+              <span class="ai-status flex-1" id="aiAppliedInfo"></span>
+              <span class="ai-err" id="aiError"></span>
+            </div>
+          </div>
         </div>
 
         <!-- User Template -->
         <div>
-          <div class="section-label">User Template</div>
-          <textarea id="userTemplate" placeholder="User prompt template…" style="min-height:100px"></textarea>
+          <div class="section-label">User Template <span class="section-label-hint">manually editable</span></div>
+          <textarea id="userTemplate" placeholder="User prompt template…" style="min-height:100px" rows="8"
+            spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
         </div>
 
-        <!-- AI Improve bar -->
-        <div>
-          <div class="section-label">Ask AI to improve</div>
-          <div class="ai-bar">
-            <div class="ai-bar-row">
-              <input class="ai-bar-input" id="aiChangeRequest" type="text"
-                placeholder="E.g., make it warmer but keep it concise… (Enter to run)" />
-              <div class="ai-target-pills">
-                <button class="pill-btn active" id="aiTargetSysBtn" type="button"
-                  title="Improve system prompt">Sys</button>
-                <button class="pill-btn" id="aiTargetUserBtn" type="button" title="Improve user template">User</button>
-              </div>
-              <button class="ai-run-btn" id="aiProposeBtn" type="button" title="Propose improvement">&#9654;</button>
-            </div>
-            <div id="aiDiffWrap" style="display:none;">
-              <div class="diff-area" id="aiDiff"></div>
-              <div class="ai-action-row">
-                <button class="btn btn-sm" id="aiApplyBtn" type="button" disabled>Apply</button>
-                <button class="btn btn-ghost btn-sm" id="aiDiscardBtn" type="button">Discard</button>
-                <span class="ai-status flex-1" id="aiAppliedInfo"></span>
-                <span class="ai-err" id="aiError"></span>
-              </div>
-            </div>
-          </div>
-          <pre id="aiNotes" style="display:none"></pre>
-          <select id="aiTargetKey" style="display:none"></select>
-        </div>
+        <!-- hidden fields still needed by JS engine -->
+        <pre id="aiNotes" style="display:none"></pre>
+        <select id="aiTargetKey" style="display:none"></select>
+        <input id="updatedAtInput" type="text" style="display:none" />
+        <input id="ttlSecondsInput" type="number" style="display:none" value="3600" />
+        <input id="versionInput" type="number" style="display:none" value="1" />
 
       </div><!-- .editor-body -->
 
       <div class="editor-footer">
-        <button class="btn btn-ghost btn-sm" id="aiUndoBtn" type="button">Undo</button>
-        <button class="btn btn-ghost btn-sm" id="aiResetBtn" type="button">Reset</button>
         <div class="flex-1"></div>
-        <button class="btn btn-sm" id="promoteBtn" type="button" disabled>Publish to repo</button>
-        <span id="promoteStatus" class="muted"></span>
+        <span id="aiEditStatus" class="muted footer-status" role="status" aria-live="polite"></span>
       </div>
     </div><!-- .editor-panel -->
 
@@ -99,137 +115,74 @@
     <div class="run-panel">
       <div class="run-header">
         <div>
-          <label>Fixture</label>
+          <label for="fixtureSelect">Fixture</label>
           <select id="fixtureSelect"></select>
         </div>
         <div>
-          <label>Max</label>
+          <label for="maxFixturesInput">Max</label>
           <input id="maxFixturesInput" type="number" min="0" value="0" style="width:64px"
             title="Max fixtures (0 = all)" />
         </div>
         <button class="btn" id="runSuiteBtn" type="button">Run</button>
-        <span id="status" class="muted"></span>
+        <span id="status" class="muted" role="status" aria-live="polite"></span>
+      </div>
+      <div class="run-preview">
+        <div class="section-label">Preview <span id="previewStatus" class="muted"
+            style="font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;"></span></div>
+        <div class="adv-row2">
+          <div>
+            <div class="col-label">Baseline</div>
+            <div class="muted" style="margin-bottom:2px;">System</div>
+            <pre id="baselinePreviewSystem" style="min-height:40px;"></pre>
+            <div class="muted" style="margin:6px 0 2px;">User</div>
+            <pre id="baselinePreviewUser" style="min-height:40px;"></pre>
+          </div>
+          <div>
+            <div class="col-label">Candidate</div>
+            <div class="muted" style="margin-bottom:2px;">System</div>
+            <pre id="candidatePreviewSystem" style="min-height:40px;"></pre>
+            <div class="muted" style="margin:6px 0 2px;">User</div>
+            <pre id="candidatePreviewUser" style="min-height:40px;"></pre>
+          </div>
+        </div>
       </div>
       <div class="run-results">
         <div id="results" class="muted">Run a fixture to see output.</div>
       </div>
     </div><!-- .run-panel -->
 
-  </div><!-- .playground -->
+  </main><!-- .playground -->
 
-  <!-- ── Advanced accordion ── -->
-  <div class="advanced-wrap">
-    <details class="adv">
-      <summary>Advanced</summary>
-      <div class="adv-body">
-
-        <!-- Edit History -->
-        <div>
-          <div class="adv-section-title">Edit History</div>
-          <div class="adv-row">
-            <div>
-              <label>Snapshot</label>
-              <select id="draftSelect" style="width:100%"></select>
-              <div id="draftMeta" class="muted" style="margin-top:4px;"></div>
-            </div>
-            <div>
-              <label>Actions</label>
-              <div style="display:flex; gap:8px; flex-wrap:wrap;">
-                <button class="btn btn-ghost btn-sm" id="draftRefreshBtn" type="button">Refresh</button>
-                <button class="btn btn-ghost btn-sm" id="draftRestoreBtn" type="button" disabled>Restore
-                  snapshot</button>
-              </div>
-            </div>
-            <div>
-              <label>Logs</label>
-              <div class="muted">
-                <a href="/api/logs?tail=200" target="_blank" rel="noopener">View server logs</a><br />
-                trace: <span id="lastTraceId" style="font-family:monospace;font-size:11px;"></span>
-              </div>
-            </div>
-          </div>
-          <div style="height:10px"></div>
-          <div class="adv-row2">
-            <div>
-              <div class="adv-section-title">Diff</div>
-              <pre id="aiDiffAdv" style="min-height:60px;"></pre>
-            </div>
-            <div>
-              <div class="adv-section-title">Notes</div>
-              <pre id="aiNotesAdv" style="min-height:60px;"></pre>
-            </div>
-          </div>
+  <!-- ── Compare modal ── -->
+  <div id="compareModal" class="compare-modal" style="display:none" role="dialog" aria-modal="true"
+    aria-label="Compare Base vs Current">
+    <div class="compare-modal-inner">
+      <div class="compare-modal-header">
+        <span class="compare-modal-title">Base vs Current</span>
+        <span class="compare-modal-legend"><span class="legend-del">removed</span> · <span
+            class="legend-add">added</span></span>
+        <div class="flex-1"></div>
+        <button class="btn btn-warning btn-sm" id="compareResetBtn" type="button">Reset to Base</button>
+        <button class="btn btn-sm" id="comparePublishBtn" type="button">Publish</button>
+        <button class="compare-modal-close" id="compareModalCloseBtn" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="compare-modal-pills" id="compareModalPills"></div>
+      <div id="compareModalError" class="compare-modal-error"></div>
+      <div class="compare-modal-body">
+        <div class="compare-col">
+          <div class="compare-col-label compare-col-label--base">Base</div>
+          <pre id="compareBaseText" class="compare-pre" tabindex="0"></pre>
         </div>
-
-        <!-- Preview -->
-        <div>
-          <div class="adv-section-title">
-            Preview
-            <span id="previewStatus" class="muted"
-              style="font-size:11px;font-weight:400;text-transform:none;letter-spacing:0;"></span>
+        <div class="compare-col">
+          <div class="compare-col-label compare-col-label--current">
+            <span id="compareCurrentLabel">Current</span>
+            <button class="btn btn-danger-outline btn-sm" id="compareDeleteBtn" type="button">Delete version</button>
           </div>
-          <div class="adv-row2">
-            <div>
-              <div class="col-label">Baseline</div>
-              <div class="muted" style="margin-bottom:2px;">System</div>
-              <pre id="baselinePreviewSystem" style="min-height:40px;"></pre>
-              <div class="muted" style="margin:6px 0 2px;">User</div>
-              <pre id="baselinePreviewUser" style="min-height:40px;"></pre>
-            </div>
-            <div>
-              <div class="col-label">Candidate</div>
-              <div class="muted" style="margin-bottom:2px;">System</div>
-              <pre id="candidatePreviewSystem" style="min-height:40px;"></pre>
-              <div class="muted" style="margin:6px 0 2px;">User</div>
-              <pre id="candidatePreviewUser" style="min-height:40px;"></pre>
-            </div>
-          </div>
+          <pre id="compareCurrentText" class="compare-pre" tabindex="0"></pre>
         </div>
-
-        <!-- Bundle metadata -->
-        <div>
-          <div class="adv-section-title">Bundle metadata</div>
-          <div class="adv-row">
-            <div>
-              <label>updatedAt (UTC ISO)</label>
-              <input id="updatedAtInput" type="text" style="width:100%" />
-            </div>
-            <div>
-              <label>ttlSeconds</label>
-              <input id="ttlSecondsInput" type="number" min="1" max="31536000" value="3600" style="width:100%" />
-            </div>
-            <div>
-              <label>version</label>
-              <input id="versionInput" type="number" min="1" max="999" value="1" style="width:100%" />
-            </div>
-          </div>
-          <div style="height:10px"></div>
-          <label>Candidate JSON</label>
-          <div style="display:flex; gap:8px; align-items:center; margin:4px 0 6px;">
-            <button class="btn btn-ghost btn-sm" id="formatJsonBtn" type="button">Format</button>
-            <button class="btn btn-ghost btn-sm" id="validateJsonBtn" type="button">Validate</button>
-            <span id="jsonStatus" class="muted"></span>
-          </div>
-          <textarea id="candidateJson" style="min-height:180px; font-size:12px;"></textarea>
-          <div id="jsonError" class="err" style="margin-top:4px;"></div>
-        </div>
-
-        <!-- Ad-hoc tune run -->
-        <div>
-          <div class="adv-section-title">Ad-hoc tune run</div>
-          <div class="muted" style="margin-bottom:6px;">
-            Runs current system prompt with a hand-written user message (no fixtures).
-          </div>
-          <textarea id="userPrompt" placeholder="Write a user message here…" style="min-height:80px;"></textarea>
-          <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
-            <button class="btn btn-ghost btn-sm" id="runTuneBtn" type="button">Run tune</button>
-            <span id="tuneStatus" class="muted"></span>
-          </div>
-        </div>
-
-      </div><!-- .adv-body -->
-    </details>
-  </div><!-- .advanced-wrap -->
+      </div>
+    </div>
+  </div>
 
   <script src="/js/workbench.js"></script>
 </body>

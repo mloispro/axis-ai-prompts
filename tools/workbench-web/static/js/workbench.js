@@ -1,3 +1,4 @@
+// ── State ─────────────────────────────────────────────────────────────
 let currentCandidate = null;
 let models = [];
 let aiLastProposal = null;
@@ -5,6 +6,17 @@ let lastTraceId = '';
 let draftVersions = [];
 let latestSuite = null;
 let latestSuiteIsClean = false;
+
+// Text of the "Base" version for the current mode key (populated on load)
+let baseSystemText = '';
+// Full prompts object from the canonical baseline (cached to allow mode-switch re-derive)
+let cachedBaselinePrompts = null;
+// Text currently shown in the textarea (the "current" live candidate)
+let currentSystemText = '';
+// Which pill id is in preview mode (null = none)
+let previewPillId = null;
+// Which pill is currently selected in the compare modal (null = none)
+let selectedComparePillId = null;
 
 const MODE_TO_PROMPT_KEY = {
   opener: 'openerSystem',
@@ -18,58 +30,34 @@ const MODE_TO_USER_TEMPLATE_KEY = {
   reg_chat: 'regChatUser',
 };
 
+// Hue palette matching vp-hue-{0..7} CSS classes; index 8 = base (green).
+const HUE_STYLES = [
+  { background: '#ecfeff', color: '#0e7490', borderColor: '#a5f3fc' },  // 0 cyan
+  { background: '#fffbeb', color: '#b45309', borderColor: '#fde68a' },  // 1 amber
+  { background: '#f5f3ff', color: '#7c3aed', borderColor: '#ddd6fe' },  // 2 violet
+  { background: '#f0f9ff', color: '#0369a1', borderColor: '#bae6fd' },  // 3 sky
+  { background: '#f0fdfa', color: '#0f766e', borderColor: '#99f6e4' },  // 4 teal
+  { background: '#fdf4ff', color: '#a21caf', borderColor: '#f0abfc' },  // 5 fuchsia
+  { background: '#fff7ed', color: '#c2410c', borderColor: '#fed7aa' },  // 6 orange
+  { background: '#eef2ff', color: '#3730a3', borderColor: '#c7d2fe' },  // 7 indigo
+  { background: '#f0fdf4', color: '#166534', borderColor: '#bbf7d0' },  // 8 green (base)
+];
+
+// ── API helper ────────────────────────────────────────────────────────
 async function api(path, opts) {
   const res = await fetch(path, opts);
   const trace = res.headers.get('X-Trace-Id') || '';
-  if (trace) {
-    lastTraceId = trace;
-    const el = document.getElementById('lastTraceId');
-    if (el) el.textContent = trace;
-  }
+  if (trace) lastTraceId = trace;
   if (!res.ok) {
     const t = await res.text();
     const base = t || ('HTTP ' + res.status);
     const suffix = (trace || lastTraceId) ? `\ntrace_id=${trace || lastTraceId}` : '';
-    const logs = `\nlogs=/api/logs?tail=200`;
-    throw new Error(base + suffix + logs);
+    throw new Error(base + suffix);
   }
   return res;
 }
 
-function shortSha(sha) {
-  const s = String(sha || '').trim();
-  return s.length >= 8 ? s.slice(0, 8) : s;
-}
-
-function setServerInfoText(text) {
-  const el = document.getElementById('serverInfo');
-  if (!el) return;
-  el.textContent = text || '';
-}
-
-async function loadServerInfo() {
-  // Always show origin (includes port) so it's obvious which backend the UI hits.
-  const origin = String(window.location.origin || '').trim();
-  setServerInfoText(origin);
-
-  try {
-    const info = await (await api('/api/info')).json();
-    const pid = info && info.pid ? String(info.pid) : '';
-    const startedAt = info && info.startedAt ? String(info.startedAt) : '';
-    const sha = info && info.gitSha ? shortSha(info.gitSha) : '';
-
-    const bits = [];
-    if (info && info.origin) bits.push(String(info.origin));
-    else if (origin) bits.push(origin);
-    if (pid) bits.push(`pid=${pid}`);
-    if (sha) bits.push(`sha=${sha}`);
-    if (startedAt) bits.push(startedAt);
-    setServerInfoText(bits.join(' | '));
-  } catch (_) {
-    // Keep origin-only display on failure.
-  }
-}
-
+// ── Utility ───────────────────────────────────────────────────────────
 function esc(s) {
   return (s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
@@ -79,14 +67,11 @@ function nowUtcIso() {
 }
 
 function parseCandidateJson(text) {
-  try {
-    const obj = JSON.parse(text);
-    return { ok: true, obj };
-  } catch (e) {
-    return { ok: false, error: e?.message || String(e) };
-  }
+  try { return { ok: true, obj: JSON.parse(text) }; }
+  catch (e) { return { ok: false, error: e?.message || String(e) }; }
 }
 
+// ── Sync helpers ──────────────────────────────────────────────────────
 function candidateFromFields() {
   const base = currentCandidate && typeof currentCandidate === 'object' ? currentCandidate : {};
   const prompts = { ...(base.prompts || {}) };
@@ -96,20 +81,13 @@ function candidateFromFields() {
   prompts[key] = document.getElementById('systemPrompt').value || '';
 
   const userKey = MODE_TO_USER_TEMPLATE_KEY[mode];
-  if (userKey) {
-    prompts[userKey] = document.getElementById('userTemplate').value || '';
-  }
+  if (userKey) prompts[userKey] = document.getElementById('userTemplate').value || '';
 
   const version = parseInt(document.getElementById('versionInput').value, 10) || (base.version ?? 1) || 1;
   const ttlSeconds = parseInt(document.getElementById('ttlSecondsInput').value, 10) || (base.ttlSeconds ?? 3600) || 3600;
   const updatedAt = (document.getElementById('updatedAtInput').value || '').trim() || (base.updatedAt ?? '') || nowUtcIso();
 
-  return {
-    version,
-    updatedAt,
-    ttlSeconds,
-    prompts,
-  };
+  return { version, updatedAt, ttlSeconds, prompts };
 }
 
 function syncFieldsFromCandidate(cand) {
@@ -122,56 +100,49 @@ function syncFieldsFromCandidate(cand) {
   const p = cand?.prompts || {};
   const mode = document.getElementById('modeSelect').value;
   const key = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
-  document.getElementById('systemPrompt').value = p[key] || '';
+
+  currentSystemText = p[key] || '';
+  document.getElementById('systemPrompt').value = currentSystemText;
 
   const userKey = MODE_TO_USER_TEMPLATE_KEY[mode];
   document.getElementById('userTemplate').value = (userKey && p[userKey]) ? p[userKey] : '';
 
-  document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
-  document.getElementById('jsonError').textContent = '';
-  document.getElementById('jsonStatus').textContent = '';
-
   refreshAiTargetKeys();
   clearAiProposal();
+  exitPreviewMode();
 }
 
-function clearAiProposal() {
-  aiLastProposal = null;
-  const diffEl = document.getElementById('aiDiff');
-  if (diffEl) diffEl.innerHTML = '';
-  const wrapEl = document.getElementById('aiDiffWrap');
-  if (wrapEl) wrapEl.style.display = 'none';
-  document.getElementById('aiError').textContent = '';
-  document.getElementById('aiApplyBtn').disabled = true;
+function syncJsonFromFields() {
+  const cand = candidateFromFields();
+  currentCandidate = cand;
+  return cand;
 }
 
 function refreshAiTargetKeys() {
   const sel = document.getElementById('aiTargetKey');
-  const prev = sel.value;
-
   const keys = Object.keys((currentCandidate && currentCandidate.prompts) ? currentCandidate.prompts : {}).sort();
   sel.innerHTML = '';
   for (const k of keys) {
     const opt = document.createElement('option');
-    opt.value = k;
-    opt.textContent = k;
+    opt.value = k; opt.textContent = k;
     sel.appendChild(opt);
   }
-
+  // Always target the system key for the current mode
   const mode = document.getElementById('modeSelect').value;
   const defaultKey = MODE_TO_PROMPT_KEY[mode] || (keys[0] || '');
-  const modePrefix = (defaultKey || '').replace('System', '');
+  if (defaultKey && keys.includes(defaultKey)) sel.value = defaultKey;
+  else if (keys.length) sel.value = keys[0];
+}
 
-  // Only restore the previous key if it belongs to the current mode (i.e. same prefix).
-  // Otherwise always snap to the mode's default — prevents opener's key bleeding into app_chat etc.
-  const prevBelongsToMode = prev && modePrefix && prev.startsWith(modePrefix);
-  if (prevBelongsToMode && keys.includes(prev)) {
-    sel.value = prev;
-  } else if (defaultKey && keys.includes(defaultKey)) {
-    sel.value = defaultKey;
-  } else if (keys.length) {
-    sel.value = keys[0];
-  }
+// ── AI proposal helpers ───────────────────────────────────────────────
+function clearAiProposal() {
+  aiLastProposal = null;
+  const diffEl = document.getElementById('aiDiff');
+  if (diffEl) diffEl.innerHTML = '';
+  document.querySelector('.ai-bar')?.classList.remove('ai-bar--reviewing');
+  document.getElementById('aiError').textContent = '';
+  document.getElementById('aiApplyBtn').disabled = true;
+  hideSysDiffOverlay();
 }
 
 function aiNotesFromProposal(p) {
@@ -179,237 +150,236 @@ function aiNotesFromProposal(p) {
   const lines = [];
   if (typeof p.status === 'string') lines.push('status: ' + p.status);
   if (typeof p.selfCheck === 'boolean') lines.push('selfCheck: ' + String(p.selfCheck));
-  if (typeof p.rationale === 'string' && p.rationale.trim()) {
-    lines.push('\nRationale:\n' + p.rationale.trim());
-  }
+  if (typeof p.rationale === 'string' && p.rationale.trim()) lines.push('\nRationale:\n' + p.rationale.trim());
   const warnings = Array.isArray(p.warnings) ? p.warnings : [];
-  if (warnings.length) {
-    lines.push('\nWarnings:\n- ' + warnings.map(w => String(w)).join('\n- '));
-  }
-  if (typeof p.refusalReason === 'string' && p.refusalReason.trim()) {
-    lines.push('\nRefusal:\n' + p.refusalReason.trim());
-  }
+  if (warnings.length) lines.push('\nWarnings:\n- ' + warnings.map(w => String(w)).join('\n- '));
+  if (typeof p.refusalReason === 'string' && p.refusalReason.trim()) lines.push('\nRefusal:\n' + p.refusalReason.trim());
   return lines.join('\n');
 }
 
 function setAiAppliedInfo(text) {
   const el = document.getElementById('aiAppliedInfo');
-  if (!el) return;
-  el.textContent = text || '';
+  if (el) el.textContent = text || '';
 }
 
 function setPromoteStatus(text) {
-  const el = document.getElementById('promoteStatus');
-  if (!el) return;
-  el.textContent = text || '';
+  if (!text) return;
+  const el = document.getElementById('aiEditStatus');
+  if (el) el.textContent = text;
 }
 
-function suiteLine(suite) {
-  if (!suite || typeof suite !== 'object') return '';
-  const runId = suite.runId ? String(suite.runId) : '';
-  const ranAt = suite.ranAt ? String(suite.ranAt) : '';
-  const isClean = suite.isClean === true;
-  const tag = isClean ? 'clean' : 'not clean';
-  const bits = [];
-  if (runId) bits.push('runId=' + runId);
-  if (ranAt) bits.push('at=' + ranAt);
-  bits.push(tag);
-  return bits.join(' | ');
+// ── Sys-prompt diff overlay ───────────────────────────────────────────
+function showSysDiffOverlay(rawDiff) {
+  const overlay = document.getElementById('sysPromptDiffOverlay');
+  if (!overlay) return;
+  overlay.innerHTML = '';
+  for (const line of rawDiff.split('\n')) {
+    const span = document.createElement('span');
+    span.textContent = line;
+    if (line.startsWith('+') && !line.startsWith('+++')) span.className = 'dl-add';
+    else if (line.startsWith('-') && !line.startsWith('---')) span.className = 'dl-del';
+    else if (line.startsWith('@@')) span.className = 'dl-hdr';
+    else span.className = 'dl-ctx';
+    overlay.appendChild(span);
+    overlay.appendChild(document.createTextNode('\n'));
+  }
+  overlay.classList.add('visible');
 }
 
-async function refreshDrafts() {
-  const appId = document.getElementById('appSelect').value;
-  const sel = document.getElementById('draftSelect');
-  const meta = document.getElementById('draftMeta');
-  const restoreBtn = document.getElementById('draftRestoreBtn');
-  const promoteBtn = document.getElementById('promoteBtn');
-
-  if (!sel || !meta || !restoreBtn || !promoteBtn) return;
-
-  const prevSelectedId = (sel && sel.value) ? String(sel.value) : '';
-
-  document.getElementById('aiError').textContent = '';
-  const res = await (await api('/api/drafts?appId=' + encodeURIComponent(appId))).json();
-  draftVersions = res.versions || [];
-  latestSuite = res.latestSuite || null;
-  latestSuiteIsClean = res.latestSuiteIsClean === true;
-
-  const PROMPT_LABELS = {
-    openerSystem: 'Opener — System Prompt',
-    appChatSystem: 'App Chat — System Prompt',
-    regChatSystem: 'Reg Chat — System Prompt',
-    openerUser: 'Opener — User Template',
-    appChatUser: 'App Chat — User Template',
-    regChatUser: 'Reg Chat — User Template',
-  };
-
-  function inferModeFromTargetKey(tk) {
-    const t = String(tk || '');
-    if (t.startsWith('opener')) return 'opener';
-    if (t.startsWith('appChat')) return 'app_chat';
-    if (t.startsWith('regChat')) return 'reg_chat';
-    return '';
+function hideSysDiffOverlay() {
+  const overlay = document.getElementById('sysPromptDiffOverlay');
+  if (overlay) {
+    overlay.classList.remove('visible');
+    overlay.innerHTML = '';
   }
-  function modeForVersion(v) {
-    if (!v) return '';
-    const m = String(v.mode || '').trim();
-    if (m) return m;
-    if (v.targetKey) return inferModeFromTargetKey(v.targetKey);
-    const r = String(v.reason || '');
-    if (r.startsWith('apply:')) return inferModeFromTargetKey(r.slice('apply:'.length));
-    return '';
+}
+
+// ── Version pills ─────────────────────────────────────────────────────
+// versionNum: 1-based creation index (1 = oldest). Pass it to include a v{n} prefix.
+function pillLabel(v, versionNum) {
+  const prefix = versionNum ? 'v' + versionNum + ' \u00b7 ' : '';
+  const req = (v.changeRequest || '').trim();
+  if (req) {
+    // Shorten more when carrying a version prefix so pills don't overflow
+    const maxLen = versionNum ? 16 : 22;
+    const short = req.length > maxLen ? req.slice(0, maxLen - 2) + '\u2026' : req;
+    return prefix + short;
+  }
+  const when = v.savedAt || '';
+  try {
+    if (when) {
+      const dt = new Date(when);
+      return prefix + dt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    }
+  } catch (_) { }
+  return 'v' + (versionNum || v.id || '?');
+}
+
+function inferModeFromTargetKey(tk) {
+  const t = String(tk || '');
+  if (t.startsWith('opener')) return 'opener';
+  if (t.startsWith('appChat')) return 'app_chat';
+  if (t.startsWith('regChat')) return 'reg_chat';
+  return '';
+}
+
+function modeForVersion(v) {
+  if (!v) return '';
+  const m = String(v.mode || '').trim();
+  if (m) return m;
+  if (v.targetKey) return inferModeFromTargetKey(v.targetKey);
+  const r = String(v.reason || '');
+  if (r.startsWith('apply:')) return inferModeFromTargetKey(r.slice('apply:'.length));
+  return '';
+}
+
+function rebuildPills(versions) {
+  const container = document.getElementById('versionPills');
+  if (!container) return;
+  container.innerHTML = '';
+
+  // Base pill (always first, pinned)
+  const baseBtn = document.createElement('button');
+  baseBtn.type = 'button';
+  baseBtn.className = 'version-pill base-pill';
+  baseBtn.dataset.id = '__base__';
+  baseBtn.textContent = 'Base';
+  baseBtn.title = 'Original / canonical prompt';
+  baseBtn.addEventListener('click', () => onPillClick('__base__', null, null));
+  container.appendChild(baseBtn);
+
+  // Draft pills: newest first (left), oldest last (right).
+  // versions[0] = v1 (oldest), versions[last] = vN (newest).
+  for (let i = versions.length - 1; i >= 0; i--) {
+    const v = versions[i];
+    const vNum = i + 1; // v1 = oldest, vN = newest
+    const hue = (vNum - 1) % 8;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `version-pill vp-hue-${hue}`;
+    btn.dataset.id = String(v.id || '');
+    btn.dataset.versionNum = String(vNum);
+    btn.textContent = pillLabel(v, vNum);
+    btn.title = `v${vNum}${v.changeRequest ? ': \u201c' + v.changeRequest + '\u201d' : ''}`;
+    btn.addEventListener('click', () => onPillClick(String(v.id || ''), v, vNum));
+    container.appendChild(btn);
   }
 
-  // Filter to only snapshots matching the current mode (opener / app_chat / reg_chat).
-  const currentMode = document.getElementById('modeSelect').value;
-  const visibleVersions = draftVersions.filter(v => {
-    const vm = modeForVersion(v);
-    return !vm || vm === currentMode;
+  // Mark active pill = latest draft (vN) or base if none
+  updateActivePill(versions.length ? String(versions[versions.length - 1].id || '') : '__base__');
+}
+
+function updateActivePill(activeId) {
+  document.querySelectorAll('#versionPills .version-pill').forEach(btn => {
+    const isActive = btn.dataset.id === activeId;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', String(isActive));
   });
-
-  sel.innerHTML = '';
-  const opt0 = document.createElement('option');
-  opt0.value = '';
-  opt0.textContent = visibleVersions.length ? 'Select an edit…' : 'No edits yet';
-  sel.appendChild(opt0);
-
-  for (const v of visibleVersions) {
-    const opt = document.createElement('option');
-    opt.value = v.id || '';
-    const when = v.savedAt ? String(v.savedAt) : '';
-    const req = v.changeRequest ? String(v.changeRequest).trim() : '';
-    const key = v.targetKey ? String(v.targetKey) : '';
-    const reason = v.reason ? String(v.reason) : '';
-    const vMode = modeForVersion(v);
-    // Format timestamp as "Mar 2, 5:10 AM"
-    let dateStr = '';
-    try {
-      if (when) {
-        const dt = new Date(when);
-        dateStr = dt.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-      }
-    } catch (_) { dateStr = when.slice(0, 16); }
-
-    const modeTag = vMode ? `[${vMode}] ` : '';
-    const promptTag = key ? ` (${PROMPT_LABELS[key] || key})` : '';
-
-    // Use changeRequest as the label when available, fall back to key name.
-    // Always include mode + prompt label so entries are clearly identifiable.
-    const rawLabel = modeTag + (req || (key ? `Edited ${key}` : reason)) + promptTag;
-    const shortLabel = rawLabel.length > 70 ? rawLabel.slice(0, 67) + '\u2026' : rawLabel;
-    opt.textContent = dateStr ? `${dateStr} \u2014 ${shortLabel}` : shortLabel;
-    sel.appendChild(opt);
-  }
-
-  if (latestSuite && typeof latestSuite === 'object') {
-    const suiteBits = [];
-    if (latestSuite.runId) suiteBits.push('runId=' + String(latestSuite.runId));
-    if (latestSuite.ranAt) suiteBits.push('at=' + String(latestSuite.ranAt));
-    meta.textContent = `latest suite: ${latestSuiteIsClean ? 'clean' : 'not clean'}${suiteBits.length ? ' (' + suiteBits.join(' | ') + ')' : ''}`;
-  } else {
-    meta.textContent = 'latest suite: (none yet)';
-  }
-  restoreBtn.disabled = true;
-  promoteBtn.disabled = !latestSuiteIsClean;
-  setPromoteStatus('');
-
-  // Populate Diff/Notes on launch by auto-selecting a draft.
-  // Preference order: preserve prior selection → newest.
-  const stillExists = prevSelectedId && visibleVersions.some(v => v && v.id === prevSelectedId);
-  const toSelect = stillExists
-    ? prevSelectedId
-    : (visibleVersions[0] ? String(visibleVersions[0].id || '') : '');
-
-  const canSelect = toSelect && visibleVersions.some(v => v && v.id === toSelect);
-  if (canSelect) {
-    sel.value = toSelect;
-    await onDraftSelected();
-  }
 }
 
-async function onDraftSelected() {
-  const appId = document.getElementById('appSelect').value;
-  const sel = document.getElementById('draftSelect');
-  const restoreBtn = document.getElementById('draftRestoreBtn');
-  const id = (sel && sel.value) ? String(sel.value) : '';
-  restoreBtn.disabled = !id;
-  document.getElementById('aiError').textContent = '';
-  if (!id) {
-    document.getElementById('aiDiffAdv').textContent = '';
-    document.getElementById('aiNotesAdv').textContent = 'No edit snapshot selected.';
+async function onPillClick(id, versionObj, versionNum) {
+  // Re-clicking the currently-previewed pill exits preview mode
+  if (id === previewPillId) {
+    exitPreviewMode();
     return;
   }
 
+  if (id === '__base__') {
+    enterPreviewMode('__base__', 'Base', baseSystemText, 8);
+    return;
+  }
+
+  const appId = document.getElementById('appSelect').value;
+  const mode = document.getElementById('modeSelect').value;
+  const key = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
+
   try {
-    const ver = (draftVersions || []).find(x => x && x.id === id) || null;
-    const verTargetKey = ver && ver.targetKey ? String(ver.targetKey) : '';
-    const fallbackTargetKey = document.getElementById('aiTargetKey').value;
-    const targetKeyToDiff = verTargetKey || fallbackTargetKey;
-    if (!targetKeyToDiff) return;
-
-    const d = await (await api('/api/drafts/diff?appId=' + encodeURIComponent(appId) + '&id=' + encodeURIComponent(id) + '&targetKey=' + encodeURIComponent(targetKeyToDiff))).json();
-    document.getElementById('aiDiffAdv').textContent = d.diff || '';
-
-    const PROMPT_LABELS = {
-      openerSystem: 'Opener \u2014 System Prompt',
-      appChatSystem: 'App Chat \u2014 System Prompt',
-      regChatSystem: 'Reg Chat \u2014 System Prompt',
-      openerUser: 'Opener \u2014 User Template',
-      appChatUser: 'App Chat \u2014 User Template',
-      regChatUser: 'Reg Chat \u2014 User Template',
-    };
-
-    const notes = [];
-
-    // 1. What the user asked for
-    const req = ver && ver.changeRequest ? String(ver.changeRequest).trim() : '';
-    if (req) {
-      notes.push('\u201c' + req + '\u201d');
-      notes.push('');
-    }
-
-    // 2. Which prompt was changed
-    const tk = verTargetKey;
-    notes.push('Prompt: ' + (PROMPT_LABELS[tk] || tk || 'unknown'));
-
-    // 3. When it was saved
-    const savedAt = ver && ver.savedAt ? String(ver.savedAt) : '';
-    if (savedAt) {
-      try {
-        const dt = new Date(savedAt);
-        notes.push('Saved:  ' + dt.toLocaleString('en-US', {
-          month: 'short', day: 'numeric', year: 'numeric',
-          hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
-        }));
-      } catch (_) {
-        notes.push('Saved:  ' + savedAt);
-      }
-    }
-
-    // 4. Test result
-    if (ver && ver.isClean === true) {
-      notes.push('Tests:  \u2713 clean');
-    } else {
-      notes.push('Tests:  (not run on this snapshot)');
-    }
-
-    document.getElementById('aiNotesAdv').textContent = notes.join('\n');
+    const d = await (await api(
+      '/api/drafts/diff?appId=' + encodeURIComponent(appId) +
+      '&id=' + encodeURIComponent(id) +
+      '&targetKey=' + encodeURIComponent(key)
+    )).json();
+    const snapshotText = d.snapshotText || (versionObj && versionObj.updatedText) || '';
+    const label = versionObj ? pillLabel(versionObj, versionNum) : id;
+    enterPreviewMode(id, label, snapshotText, versionNum !== null && versionNum !== undefined ? (versionNum - 1) % 8 : 0);
   } catch (e) {
-    document.getElementById('aiError').textContent = e.message || String(e);
+    document.getElementById('aiError').textContent = e.message;
   }
 }
 
-async function restoreDraft() {
-  const sel = document.getElementById('draftSelect');
-  const id = (sel && sel.value) ? String(sel.value) : '';
-  if (!id) return;
+function enterPreviewMode(id, label, text, hue) {
+  previewPillId = id;
+  updateActivePill(id);
+
+  document.getElementById('systemPrompt').value = text;
+
+  // Show a colored diff in the overlay so highlights are visible on the main screen.
+  // Skip for the base pill (no diff — it IS the base).
+  if (id !== '__base__') {
+    const ops = computeLineDiff(baseSystemText, text);
+    const overlay = document.getElementById('sysPromptDiffOverlay');
+    if (overlay) {
+      overlay.innerHTML = '';
+      for (const op of ops) {
+        const s = document.createElement('span');
+        if (op.type === 'del') s.className = 'dl-del';
+        else if (op.type === 'add') s.className = hue !== undefined ? `dl-add-hue-${hue}` : 'dl-add';
+        else s.className = 'dl-ctx';
+        s.textContent = op.text;
+        overlay.appendChild(s);
+        overlay.appendChild(document.createTextNode('\n'));
+      }
+      overlay.classList.add('visible');
+    }
+  } else {
+    hideSysDiffOverlay();
+  }
+
+  const bar = document.getElementById('sysVersionBar');
+  const lbl = document.getElementById('sysVersionBarLabel');
+  if (bar && lbl) {
+    lbl.textContent = 'Previewing: ' + label;
+    const s = HUE_STYLES[hue !== undefined && hue >= 0 && hue <= 8 ? hue : 8];
+    bar.style.background = s.background;
+    bar.style.color = s.color;
+    bar.style.borderColor = s.borderColor;
+    bar.classList.add('visible');
+  }
+}
+
+function exitPreviewMode() {
+  if (!previewPillId) return;
+  previewPillId = null;
+
+  document.getElementById('systemPrompt').value = currentSystemText;
+  hideSysDiffOverlay();
+
+  const bar = document.getElementById('sysVersionBar');
+  if (bar) {
+    bar.classList.remove('visible');
+    bar.style.background = '';
+    bar.style.color = '';
+    bar.style.borderColor = '';
+  }
+
+  const currentMode = document.getElementById('modeSelect').value;
+  const visibleDrafts = draftVersions.filter(v => { const vm = modeForVersion(v); return !vm || vm === currentMode; });
+  updateActivePill(visibleDrafts.length ? String(visibleDrafts[visibleDrafts.length - 1].id || '') : '__base__');
+}
+
+async function restorePreviewedPill() {
+  if (!previewPillId) return;
+  if (previewPillId === '__base__') {
+    await aiReset();
+    return;
+  }
   if (!confirm('Restore this snapshot into your local Candidate prompts?')) return;
 
   const appId = document.getElementById('appSelect').value;
   await api('/api/drafts/restore', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ appId, id }),
+    body: JSON.stringify({ appId, id: previewPillId }),
   });
 
   const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
@@ -419,11 +389,185 @@ async function restoreDraft() {
   document.getElementById('aiEditStatus').textContent = 'Restored snapshot';
 }
 
+// ── Baseline text helpers ─────────────────────────────────────────────
+function refreshBaseSystemText() {
+  const mode = (document.getElementById('modeSelect') || {}).value || '';
+  const key = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
+  baseSystemText = (cachedBaselinePrompts && cachedBaselinePrompts[key]) ? cachedBaselinePrompts[key] : '';
+}
+
+// ── Compare modal ─────────────────────────────────────────────────────
+
+// Line-level LCS diff. Returns ops: [{type:'keep'|'del'|'add', text}]
+function computeLineDiff(oldText, newText) {
+  const a = oldText.split('\n');
+  const b = newText.split('\n');
+  const m = a.length, n = b.length;
+  // Build LCS table bottom-up
+  const dp = Array.from({ length: m + 1 }, () => new Int32Array(n + 1));
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j]
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  // Traceback
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < m && j < n) {
+    if (a[i] === b[j]) { ops.push({ type: 'keep', text: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push({ type: 'del', text: a[i++] }); }
+    else { ops.push({ type: 'add', text: b[j++] }); }
+  }
+  while (i < m) ops.push({ type: 'del', text: a[i++] });
+  while (j < n) ops.push({ type: 'add', text: b[j++] });
+  return ops;
+}
+
+// Render one side of a side-by-side diff into el.
+// side='del' → base pane (keep + del lines); side='add' → current pane (keep + add lines)
+// hue: optional 0-7 index to use dl-add-hue-{n} instead of generic dl-add (per-version color)
+function renderDiffPane(el, ops, side, hue) {
+  el.innerHTML = '';
+  for (const op of ops) {
+    if (op.type !== 'keep' && op.type !== side) continue; // skip the other side's lines
+    const s = document.createElement('span');
+    if (op.type === 'del') s.className = 'dl-del';
+    else if (op.type === 'add') s.className = hue !== undefined ? `dl-add-hue-${hue}` : 'dl-add';
+    else s.className = 'dl-ctx';
+    s.textContent = op.text;
+    el.appendChild(s);
+    el.appendChild(document.createTextNode('\n'));
+  }
+}
+
+// Render a diff between base and the selected pill in the compare modal.
+// knownText: pass already-loaded text to skip the API fetch (used for latest draft).
+async function selectComparePill(id, versionObj, knownText, versionNum) {
+  selectedComparePillId = id;
+  document.querySelectorAll('#compareModalPills .version-pill').forEach(btn => {
+    const isActive = btn.dataset.id === id;
+    btn.classList.toggle('active', isActive);
+    btn.setAttribute('aria-pressed', String(isActive));
+  });
+
+  // Clear any previous inline error when switching pills.
+  const errEl = document.getElementById('compareModalError');
+  if (errEl) errEl.textContent = '';
+
+  let text = knownText;
+  if (text === undefined) {
+    const appId = document.getElementById('appSelect').value;
+    const mode = document.getElementById('modeSelect').value;
+    const key = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
+    const d = await (await api(
+      '/api/drafts/diff?appId=' + encodeURIComponent(appId) +
+      '&id=' + encodeURIComponent(id) +
+      '&targetKey=' + encodeURIComponent(key)
+    )).json();
+    text = d.snapshotText || (versionObj && versionObj.updatedText) || '';
+  }
+
+  const label = versionObj ? pillLabel(versionObj, versionNum) : id;
+  const currentColLabel = document.getElementById('compareCurrentLabel');
+  if (currentColLabel) currentColLabel.textContent = 'Current \u00b7 ' + label;
+
+  const baseEl = document.getElementById('compareBaseText');
+  const currentEl = document.getElementById('compareCurrentText');
+  const ops = computeLineDiff(baseSystemText, text);
+  const hue = versionNum !== null && versionNum !== undefined ? (versionNum - 1) % 8 : undefined;
+  renderDiffPane(baseEl, ops, 'del');
+  renderDiffPane(currentEl, ops, 'add', hue);
+}
+
+function openCompareModal() {
+  const currentMode = document.getElementById('modeSelect').value;
+  const visibleDrafts = draftVersions.filter(v => { const vm = modeForVersion(v); return !vm || vm === currentMode; });
+
+  // Build version pills inside the modal: newest first (left), oldest last (right).
+  // visibleDrafts[0] = v1 (oldest), visibleDrafts[last] = vN (newest).
+  const pillsEl = document.getElementById('compareModalPills');
+  pillsEl.innerHTML = '';
+  for (let i = visibleDrafts.length - 1; i >= 0; i--) {
+    const v = visibleDrafts[i];
+    const vNum = i + 1;
+    const hue = (vNum - 1) % 8;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `version-pill vp-hue-${hue}`;
+    btn.dataset.id = String(v.id || '');
+    btn.dataset.versionNum = String(vNum);
+    btn.textContent = pillLabel(v, vNum);
+    btn.title = `v${vNum}${v.changeRequest ? ': \u201c' + v.changeRequest + '\u201d' : ''}`;
+    btn.addEventListener('click', () =>
+      selectComparePill(String(v.id || ''), v, undefined, vNum).catch(e => {
+        document.getElementById('aiError').textContent = e.message;
+      })
+    );
+    pillsEl.appendChild(btn);
+  }
+
+  // Sync action button states
+  const deleteBtn = document.getElementById('compareDeleteBtn');
+  const publishBtn = document.getElementById('comparePublishBtn');
+  if (deleteBtn) deleteBtn.disabled = draftVersions.length === 0;
+  if (publishBtn) {
+    publishBtn.disabled = !latestSuiteIsClean;
+    publishBtn.title = latestSuiteIsClean
+      ? 'Publish candidate \u2192 canonical prompts file'
+      : 'Run the suite first (all fixtures must pass)';
+  }
+
+  document.getElementById('compareModal').style.display = 'flex';
+
+  // Default to latest draft = vN (use currentSystemText — no fetch needed)
+  const latestDraft = visibleDrafts.length ? visibleDrafts[visibleDrafts.length - 1] : null;
+  const latestVNum = visibleDrafts.length;
+  if (latestDraft) {
+    selectComparePill(String(latestDraft.id || ''), latestDraft, currentSystemText, latestVNum).catch(e => {
+      document.getElementById('aiError').textContent = e.message;
+    });
+  } else {
+    // No drafts: show live candidate vs base
+    const currentColLabel = document.getElementById('compareCurrentLabel');
+    if (currentColLabel) currentColLabel.textContent = 'Current';
+    const baseEl = document.getElementById('compareBaseText');
+    const currentEl = document.getElementById('compareCurrentText');
+    const ops = computeLineDiff(baseSystemText, currentSystemText);
+    renderDiffPane(baseEl, ops, 'del');
+    renderDiffPane(currentEl, ops, 'add');
+  }
+}
+
+function closeCompareModal() {
+  document.getElementById('compareModal').style.display = 'none';
+}
+
+// ── Draft refresh + Publish ───────────────────────────────────────────
+async function refreshDrafts() {
+  const appId = document.getElementById('appSelect').value;
+  document.getElementById('aiError').textContent = '';
+
+  const res = await (await api('/api/drafts?appId=' + encodeURIComponent(appId))).json();
+  draftVersions = res.versions || [];
+  latestSuite = res.latestSuite || null;
+  latestSuiteIsClean = res.latestSuiteIsClean === true;
+
+  // F1: Disable delete when there is no draft history
+  const deleteBtn = document.getElementById('compareDeleteBtn');
+  if (deleteBtn) deleteBtn.disabled = draftVersions.length === 0;
+
+  const currentMode = document.getElementById('modeSelect').value;
+  const visibleDrafts = draftVersions.filter(v => { const vm = modeForVersion(v); return !vm || vm === currentMode; });
+  rebuildPills(visibleDrafts);
+}
+
 async function promoteToCanonical() {
-  if (!confirm('Publish Candidate → repo prompts file (prompts/<appId>.json) and clear local history?')) return;
+  if (!confirm('Publish Candidate \u2192 repo prompts file (prompts/<appId>.json) and clear local history?')) return;
 
   const appId = document.getElementById('appSelect').value;
-  setPromoteStatus('Promoting…');
+  setPromoteStatus('Promoting\u2026');
   await api('/api/promote', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -437,6 +581,7 @@ async function promoteToCanonical() {
   setPromoteStatus('Done');
 }
 
+// ── AI propose / apply / undo / reset ────────────────────────────────
 async function aiPropose() {
   clearAiProposal();
   setAiAppliedInfo('');
@@ -445,19 +590,20 @@ async function aiPropose() {
   const appId = document.getElementById('appSelect').value;
   const model = document.getElementById('modelSelect').value;
   const dryRun = !!document.getElementById('dryRun').checked;
-  const targetKey = document.getElementById('aiTargetKey').value;
+  const mode = document.getElementById('modeSelect').value;
+  const targetKey = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
   const changeRequest = (document.getElementById('aiChangeRequest').value || '').trim();
 
-  if (!targetKey) {
-    document.getElementById('aiError').textContent = 'Pick a target key.';
-    return;
-  }
   if (!changeRequest) {
     document.getElementById('aiError').textContent = 'Enter a change request.';
     return;
   }
 
-  // Show immediate in-bar loading feedback.
+  // Ensure aiTargetKey hidden select matches
+  const sel = document.getElementById('aiTargetKey');
+  if ([...sel.options].some(o => o.value === targetKey)) sel.value = targetKey;
+
+  // Loading state
   const proposeBtn = document.getElementById('aiProposeBtn');
   const inputEl = document.getElementById('aiChangeRequest');
   const aiBar = inputEl.closest('.ai-bar');
@@ -466,16 +612,14 @@ async function aiPropose() {
   inputEl.disabled = true;
   if (aiBar) aiBar.classList.add('loading');
 
-  // Open diff area immediately with pulsing placeholder.
+  // Open diff area immediately with pulsing placeholder
   const diffEl = document.getElementById('aiDiff');
-  const diffWrap = document.getElementById('aiDiffWrap');
-  diffEl.innerHTML = '<div class="ai-thinking">Working on it…</div>';
-  diffWrap.style.display = '';
+  diffEl.innerHTML = '<div class="ai-thinking">Working on it\u2026</div>';
+  if (aiBar) aiBar.classList.add('ai-bar--reviewing');
   document.getElementById('aiApplyBtn').disabled = true;
   status.textContent = '';
 
   try {
-    // Persist current editor fields so server reads the latest candidate text.
     document.getElementById('updatedAtInput').value = nowUtcIso();
     const candidateObj = syncJsonFromFields();
     await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId), {
@@ -495,6 +639,8 @@ async function aiPropose() {
     aiLastProposal = proposal;
 
     renderColoredDiff(res.diff || '', diffEl);
+    showSysDiffOverlay(res.diff || '');
+
     const _notesEl = document.getElementById('aiNotes');
     if (_notesEl) _notesEl.textContent = aiNotesFromProposal(proposal);
 
@@ -506,13 +652,15 @@ async function aiPropose() {
       if (refusal) document.getElementById('aiError').textContent = refusal;
     }
 
-    status.textContent = ok ? 'Ready to apply' : 'Not applyable';
+    status.textContent = ok ? 'Ready to apply' : 'Cannot apply';
   } finally {
-    // Always restore the bar to interactive state.
     proposeBtn.classList.remove('loading');
-    proposeBtn.disabled = false;
+    // W5: re-enable propose only when input has text
+    proposeBtn.disabled = !(inputEl.value.trim());
     inputEl.disabled = false;
     if (aiBar) aiBar.classList.remove('loading');
+    // F4: return focus to input after proposal (deferred to avoid race with DOM updates)
+    setTimeout(() => inputEl.focus(), 0);
   }
 }
 
@@ -520,20 +668,18 @@ async function aiApply() {
   const status = document.getElementById('aiEditStatus');
   const proposal = aiLastProposal;
   if (!proposal || proposal.status !== 'ok' || proposal.selfCheck !== true) {
-    document.getElementById('aiError').textContent = 'No applyable proposal.';
+    document.getElementById('aiError').textContent = 'No valid proposal to apply.';
     return;
   }
 
-  status.textContent = 'Applying…';
+  status.textContent = 'Applying\u2026';
   document.getElementById('aiError').textContent = '';
 
   const appId = document.getElementById('appSelect').value;
   const mode = document.getElementById('modeSelect').value;
   const model = document.getElementById('modelSelect').value;
   const payload = {
-    appId,
-    mode,
-    model,
+    appId, mode, model,
     changeRequest: (document.getElementById('aiChangeRequest').value || '').trim(),
     notes: aiNotesFromProposal(proposal),
     targetKey: proposal.targetKey,
@@ -553,32 +699,40 @@ async function aiApply() {
   const stored = (cand && cand.prompts && typeof cand.prompts === 'object') ? cand.prompts[proposal.targetKey] : null;
   const verified = (typeof stored === 'string') && (stored === proposal.updatedText);
 
-  const visibleSystemKey = MODE_TO_PROMPT_KEY[mode];
-  const visibleUserKey = MODE_TO_USER_TEMPLATE_KEY[mode];
-  const visibleHint = (proposal.targetKey === visibleSystemKey || proposal.targetKey === visibleUserKey)
-    ? ''
-    : ` (note: this key is not shown in the current mode editor)`;
-
   const when = (applyRes && typeof applyRes.updatedAt === 'string' && applyRes.updatedAt) ? applyRes.updatedAt : (cand && cand.updatedAt ? String(cand.updatedAt) : '');
   const trace = (applyRes && typeof applyRes.traceId === 'string' && applyRes.traceId) ? applyRes.traceId : (lastTraceId || '');
   const tracePart = trace ? ` | trace_id=${trace}` : '';
   const whenPart = when ? ` at ${when}` : '';
-  setAiAppliedInfo(`Applied ${proposal.targetKey}${whenPart}${tracePart} — ${verified ? 'VERIFIED' : 'NOT VERIFIED'}${visibleHint}`);
+  setAiAppliedInfo(`Applied${whenPart}${tracePart} \u2014 ${verified ? 'VERIFIED' : 'NOT VERIFIED'}`);
 
   clearAiProposal();
   schedulePreview();
+  await refreshDrafts(); // Show new pill immediately before suite run
 
-  // Auto-run the suite to validate the change (dry-run aware).
-  status.textContent = 'Applied; running suite…';
+  status.textContent = 'Applied; running suite\u2026';
   await runSuite();
   status.textContent = 'Applied + suite done';
+  await refreshDrafts(); // Refresh again after suite to update publish eligibility
+}
+
+async function aiDeleteVersion(draftId) {
+  const appId = document.getElementById('appSelect').value;
+  await api('/api/drafts/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ appId, id: draftId }),
+  });
+  // syncFieldsFromCandidate will call exitPreviewMode() if the deleted version was active
+  const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
+  syncFieldsFromCandidate(cand);
+  schedulePreview();
   await refreshDrafts();
 }
 
 async function aiUndo() {
   clearAiProposal();
   const status = document.getElementById('aiEditStatus');
-  status.textContent = 'Undoing…';
+  status.textContent = 'Undoing\u2026';
   const appId = document.getElementById('appSelect').value;
   await api('/api/edit/undo', {
     method: 'POST',
@@ -588,15 +742,15 @@ async function aiUndo() {
   const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
   syncFieldsFromCandidate(cand);
   schedulePreview();
-  status.textContent = 'Undone';
+  status.textContent = 'Version deleted';
   await refreshDrafts();
 }
 
 async function aiReset() {
-  if (!confirm('Reset candidate prompts back to canonical?')) return;
+  if (!confirm('Remove all draft versions and reset to the base prompt? This cannot be undone.')) return;
   clearAiProposal();
   const status = document.getElementById('aiEditStatus');
-  status.textContent = 'Resetting…';
+  status.textContent = 'Resetting\u2026';
   const appId = document.getElementById('appSelect').value;
   await api('/api/edit/reset', {
     method: 'POST',
@@ -610,94 +764,26 @@ async function aiReset() {
   await refreshDrafts();
 }
 
-function syncJsonFromFields() {
-  const cand = candidateFromFields();
-  document.getElementById('candidateJson').value = JSON.stringify(cand, null, 2);
-  document.getElementById('jsonError').textContent = '';
-  document.getElementById('jsonStatus').textContent = 'Synced from editor fields.';
-  currentCandidate = cand;
-  return cand;
-}
-
-function syncFieldsFromJson() {
-  const text = document.getElementById('candidateJson').value;
-  const parsed = parseCandidateJson(text);
-  if (!parsed.ok) {
-    document.getElementById('jsonError').textContent = parsed.error;
-    document.getElementById('jsonStatus').textContent = 'Invalid JSON.';
-    return null;
-  }
-  document.getElementById('jsonError').textContent = '';
-  document.getElementById('jsonStatus').textContent = 'Loaded JSON into fields.';
-  syncFieldsFromCandidate(parsed.obj);
-  return parsed.obj;
-}
-
-function formatJson() {
-  const text = document.getElementById('candidateJson').value;
-  const parsed = parseCandidateJson(text);
-  if (!parsed.ok) {
-    document.getElementById('jsonError').textContent = parsed.error;
-    document.getElementById('jsonStatus').textContent = 'Invalid JSON.';
-    return;
-  }
-  document.getElementById('candidateJson').value = JSON.stringify(parsed.obj, null, 2);
-  document.getElementById('jsonError').textContent = '';
-  document.getElementById('jsonStatus').textContent = 'Formatted.';
-}
-
-function validateJson() {
-  const text = document.getElementById('candidateJson').value;
-  const parsed = parseCandidateJson(text);
-  if (!parsed.ok) {
-    document.getElementById('jsonError').textContent = parsed.error;
-    document.getElementById('jsonStatus').textContent = 'Invalid JSON.';
-    return false;
-  }
-
-  const obj = parsed.obj;
-  const errs = [];
-  if (typeof obj?.version !== 'number') errs.push('version must be a number');
-  if (typeof obj?.updatedAt !== 'string' || !obj.updatedAt.trim()) errs.push('updatedAt must be a non-empty string');
-  if (typeof obj?.ttlSeconds !== 'number') errs.push('ttlSeconds must be a number');
-  if (typeof obj?.prompts !== 'object') errs.push('prompts must be an object');
-
-  if (errs.length) {
-    document.getElementById('jsonError').textContent = errs.join(' | ');
-    document.getElementById('jsonStatus').textContent = 'Invalid schema.';
-    return false;
-  }
-
-  document.getElementById('jsonError').textContent = '';
-  document.getElementById('jsonStatus').textContent = 'OK.';
-  return true;
-}
-
-function money(n) {
-  if (n === null || n === undefined || !Number.isFinite(n)) return '';
-  return '$' + n.toFixed(6);
-}
-
+// ── Models / Apps / Fixtures ─────────────────────────────────────────
 function fmtRate(n) {
   if (n === null || n === undefined || !Number.isFinite(n)) return '';
   return '$' + n.toFixed(3);
 }
 
 function modelLabel(m) {
-  const tag = m.isLatest ? ' (latest)' : '';
-  return `${m.model}${tag} — in ${fmtRate(m.inputPer1M)} / cached ${fmtRate(m.cachedInputPer1M)} / out ${fmtRate(m.outputPer1M)}`;
+  return m.model;
 }
 
 async function loadModels() {
   const res = await (await api('/api/models')).json();
   models = res.models || [];
-
   const modelSelect = document.getElementById('modelSelect');
   modelSelect.innerHTML = '';
   for (const m of models) {
     const opt = document.createElement('option');
     opt.value = m.model;
     opt.textContent = modelLabel(m);
+    opt.title = `in ${fmtRate(m.inputPer1M)} / cached ${fmtRate(m.cachedInputPer1M)} / out ${fmtRate(m.outputPer1M)}`;
     modelSelect.appendChild(opt);
   }
 }
@@ -720,18 +806,17 @@ async function loadApps() {
 async function onAppChanged() {
   const appId = document.getElementById('appSelect').value;
   const cfg = await (await api('/api/apps/' + encodeURIComponent(appId))).json();
-
   const modeSelect = document.getElementById('modeSelect');
   modeSelect.innerHTML = '';
   for (const m of cfg.modes) {
     const opt = document.createElement('option');
-    opt.value = m;
-    opt.textContent = m;
+    opt.value = m; opt.textContent = m;
     modeSelect.appendChild(opt);
   }
 
   modeSelect.addEventListener('change', () => {
     if (currentCandidate) syncFieldsFromCandidate(currentCandidate);
+    refreshBaseSystemText();
     loadFixtures().catch(() => { });
     refreshDrafts().catch(() => { });
   });
@@ -741,9 +826,17 @@ async function onAppChanged() {
   const has = [...modelSelect.options].some(o => o.value === desired);
   modelSelect.value = has ? desired : (modelSelect.options[0]?.value || desired);
 
+  // Try to load baseline text for compare modal
+  try {
+    const baseRes = await (await api('/api/baselines?appId=' + encodeURIComponent(appId))).json();
+    cachedBaselinePrompts = (baseRes && baseRes.prompts) ? baseRes.prompts : null;
+  } catch (_) {
+    cachedBaselinePrompts = null;
+  }
+  refreshBaseSystemText();
+
   const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
   syncFieldsFromCandidate(cand);
-
   await loadFixtures();
   schedulePreview();
   await refreshDrafts();
@@ -755,22 +848,19 @@ async function loadFixtures() {
   const res = await (await api('/api/fixtures?appId=' + encodeURIComponent(appId) + '&mode=' + encodeURIComponent(mode))).json();
   const sel = document.getElementById('fixtureSelect');
   sel.innerHTML = '';
-
   const optAll = document.createElement('option');
-  optAll.value = '';
-  optAll.textContent = 'All fixtures';
+  optAll.value = ''; optAll.textContent = 'All fixtures';
   sel.appendChild(optAll);
-
   for (const fx of (res.fixtures || [])) {
     const opt = document.createElement('option');
     opt.value = fx.name || '';
     opt.textContent = fx.name + (fx.kind ? ` (${fx.kind})` : '');
     sel.appendChild(opt);
   }
-
   sel.onchange = () => schedulePreview();
 }
 
+// ── Preview ────────────────────────────────────────────────────────────
 let previewTimer = null;
 function schedulePreview() {
   if (previewTimer) clearTimeout(previewTimer);
@@ -783,38 +873,39 @@ function setPreviewText(id, text) {
 
 async function updatePreview() {
   const status = document.getElementById('previewStatus');
-
   const fixture = (document.getElementById('fixtureSelect').value || '').trim();
   if (!fixture) {
     status.textContent = 'Select a fixture to preview.';
-    setPreviewText('baselinePreviewSystem', '');
-    setPreviewText('baselinePreviewUser', '');
-    setPreviewText('candidatePreviewSystem', '');
-    setPreviewText('candidatePreviewUser', '');
+    ['baselinePreviewSystem', 'baselinePreviewUser', 'candidatePreviewSystem', 'candidatePreviewUser']
+      .forEach(id => setPreviewText(id, ''));
     return;
   }
-
-  status.textContent = 'Rendering…';
-
+  status.textContent = 'Rendering\u2026';
   const appId = document.getElementById('appSelect').value;
   const mode = document.getElementById('modeSelect').value;
   const systemPrompt = document.getElementById('systemPrompt').value || '';
   const userTemplate = document.getElementById('userTemplate').value || '';
 
   const payload = { appId, mode, fixture, systemPrompt, userTemplate };
-  const res = await (await api('/api/compose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })).json();
+  const res = await (await api('/api/compose', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })).json();
 
   setPreviewText('baselinePreviewSystem', res?.baseline?.system || '');
   setPreviewText('baselinePreviewUser', res?.baseline?.user || '');
   setPreviewText('candidatePreviewSystem', res?.candidate?.system || '');
   setPreviewText('candidatePreviewUser', res?.candidate?.user || '');
-
   status.textContent = `OK: ${res?.fixture?.name || fixture}`;
 }
 
+// ── Run suite ──────────────────────────────────────────────────────────
 async function runSuite() {
   const status = document.getElementById('status');
-  status.textContent = 'Running suite…';
+  const runBtn = document.getElementById('runSuiteBtn');
+  status.textContent = 'Running suite\u2026';
+  if (runBtn) { runBtn.disabled = true; runBtn.textContent = 'Running\u2026'; }
 
   const appId = document.getElementById('appSelect').value;
   const mode = document.getElementById('modeSelect').value;
@@ -823,63 +914,46 @@ async function runSuite() {
   const maxFixtures = parseInt(document.getElementById('maxFixturesInput').value, 10) || 0;
   const fixture = (document.getElementById('fixtureSelect').value || '').trim();
 
-  // Ensure updatedAt is set and sync JSON from field editor.
   document.getElementById('updatedAtInput').value = nowUtcIso();
   const candidateObj = syncJsonFromFields();
-  const candidateJson = JSON.stringify(candidateObj);
-  await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: candidateJson });
+  await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId), {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(candidateObj),
+  });
 
   const payload = { appId, mode, model, dryRun, maxFixtures, baselineSource: 'local_file' };
   if (fixture) payload.fixture = fixture;
 
-  const run = await (await api('/api/run/ab', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })).json();
+  try {
+    const run = await (await api('/api/run/ab', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })).json();
 
-  status.textContent = 'Done';
-  renderSuiteResults(run);
-  await refreshDrafts();
+    status.textContent = 'Done';
+    renderSuiteResults(run);
+    await refreshDrafts();
+  } finally {
+    if (runBtn) { runBtn.disabled = false; runBtn.textContent = 'Run'; }
+  }
 }
 
-async function runTune() {
-  const status = document.getElementById('tuneStatus');
-  status.textContent = 'Running…';
-
-  const appId = document.getElementById('appSelect').value;
-  const mode = document.getElementById('modeSelect').value;
-  const model = document.getElementById('modelSelect').value;
-  const dryRun = !!document.getElementById('dryRun').checked;
-  const systemPrompt = document.getElementById('systemPrompt').value || '';
-  const userPrompt = document.getElementById('userPrompt').value || '';
-
-  // Ensure updatedAt is set and sync JSON from field editor.
-  document.getElementById('updatedAtInput').value = nowUtcIso();
-  const candidateObj = syncJsonFromFields();
-  const candidateJson = JSON.stringify(candidateObj);
-  await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: candidateJson });
-
-  const payload = { appId, mode, model, systemPrompt, userPrompt, dryRun };
-  const run = await (await api('/api/run/tune', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })).json();
-
-  status.textContent = 'Done';
-  renderResults(run);
-}
-
+// ── Result renderers ───────────────────────────────────────────────────
 function renderSuiteResults(run) {
   const root = document.getElementById('results');
-
   const reportPath = run.reportPath || '';
   const reportLink = reportPath ? `<a href="${esc(reportPath)}" target="_blank" rel="noreferrer">ab_report.html</a>` : '';
-
   const items = run.items || [];
   const totals = run.totals || {};
 
-  const totalsLine = `Tokens — live in/out: ${esc(String(totals.baselineInputTokens ?? 0))}/${esc(String(totals.baselineOutputTokens ?? 0))} &nbsp;·&nbsp; draft in/out: ${esc(String(totals.candidateInputTokens ?? 0))}/${esc(String(totals.candidateOutputTokens ?? 0))}`;
+  const totalsLine = `Tokens \u2014 live in/out: ${esc(String(totals.baselineInputTokens ?? 0))}/${esc(String(totals.baselineOutputTokens ?? 0))} &nbsp;\u00b7&nbsp; draft in/out: ${esc(String(totals.candidateInputTokens ?? 0))}/${esc(String(totals.candidateOutputTokens ?? 0))}`;
 
-  let html = `
-        <div class="muted">Report: ${reportLink || '(not available)'} &nbsp;·&nbsp; ${totalsLine}</div>
-        <div style="height:10px"></div>
-      `;
+  let html = `<div class="muted">Report: ${reportLink || '(not available)'} &nbsp;\u00b7&nbsp; ${totalsLine}</div><div style="height:10px"></div>`;
 
-  for (const it of items) {
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
     const name = it.fixture || '';
     const inp = it.baselineInput || it.candidateInput || '';
     const bout = it.baselineOutput || '';
@@ -888,122 +962,36 @@ function renderSuiteResults(run) {
     const cflags = Array.isArray(it.candidateFlags) ? it.candidateFlags.join(',') : '';
     const berr = it.baselineError || '';
     const cerr = it.candidateError || '';
+    const shouldOpen = i === 0 || !!cerr;
 
     html += `
-          <details class="card ab-fixture" open>
-            <summary><strong>${esc(name)}</strong></summary>
-            <div style="height:8px"></div>
-            <details class="ab-input-toggle">
-              <summary>Input</summary>
-              <pre class="ab-input-pre">${esc(inp)}</pre>
-            </details>
-            <div style="height:8px"></div>
-            <div class="result-grid">
-              <div>
-                <div class="ab-col-label ab-col-live">Live</div>
-                <div class="muted ab-flags">flags: ${esc(bflags || '(none)')}${berr ? ` | error: ${esc(berr)}` : ''}</div>
-                <pre class="ab-output">${esc(bout)}</pre>
-              </div>
-              <div>
-                <div class="ab-col-label ab-col-draft">Draft</div>
-                <div class="muted ab-flags">flags: ${esc(cflags || '(none)')}${cerr ? ` | error: ${esc(cerr)}` : ''}</div>
-                <pre class="ab-output">${esc(cout)}</pre>
-              </div>
-            </div>
-          </details>
-          <div style="height:8px"></div>
-        `;
+      <details class="card ab-fixture"${shouldOpen ? ' open' : ''}>
+        <summary><strong>${esc(name)}</strong></summary>
+        <div style="height:8px"></div>
+        <details class="ab-input-toggle">
+          <summary>Input</summary>
+          <pre class="ab-input-pre">${esc(inp)}</pre>
+        </details>
+        <div style="height:8px"></div>
+        <div class="result-grid">
+          <div>
+            <div class="ab-col-label ab-col-live">Live</div>
+            <div class="muted ab-flags">flags: ${esc(bflags || '(none)')}${berr ? ` | error: ${esc(berr)}` : ''}</div>
+            <pre class="ab-output">${esc(bout)}</pre>
+          </div>
+          <div>
+            <div class="ab-col-label ab-col-draft">Draft</div>
+            <div class="muted ab-flags">flags: ${esc(cflags || '(none)')}${cerr ? ` | error: ${esc(cerr)}` : ''}</div>
+            <pre class="ab-output">${esc(cout)}</pre>
+          </div>
+        </div>
+      </details>
+      <div style="height:8px"></div>
+    `;
   }
 
   root.innerHTML = html;
 }
-
-function renderResults(run) {
-  const root = document.getElementById('results');
-  const u = run.usage || {};
-  const p = run.pricing || {};
-  const c = run.cost || {};
-
-  const tokensLine = `Tokens — in/out/total/cached: ${esc(String(u.inputTokens ?? 0))} / ${esc(String(u.outputTokens ?? 0))} / ${esc(String(u.totalTokens ?? 0))} / ${esc(String(u.cachedTokens ?? 0))}`;
-  const pricingLine = `Pricing ($/1M) — in ${esc(String(p.inputPer1M ?? ''))} / cached ${esc(String(p.cachedInputPer1M ?? ''))} / out ${esc(String(p.outputPer1M ?? ''))}`;
-  const costLine = `Cost — input ${esc(money(c.inputUsd))} | cached ${esc(money(c.cachedInputUsd))} | output ${esc(money(c.outputUsd))} | total ${esc(money(c.totalUsd))}`;
-
-  root.innerHTML = `
-        <div class="muted">Model: ${esc(run.model || '')}<br/>${tokensLine}<br/>${pricingLine}<br/>${costLine}</div>
-        <div style="height:10px"></div>
-        <div><strong>OUTPUT</strong><pre>${esc(run.outputText || '')}</pre></div>
-      `;
-}
-
-document.getElementById('formatJsonBtn').addEventListener('click', () => {
-  formatJson();
-});
-
-document.getElementById('validateJsonBtn').addEventListener('click', () => {
-  validateJson();
-});
-
-// Keep Advanced JSON and field editor in sync (best-effort).
-document.getElementById('candidateJson').addEventListener('blur', () => {
-  syncFieldsFromJson();
-});
-
-document.getElementById('runSuiteBtn').addEventListener('click', () => runSuite().catch(e => {
-  document.getElementById('status').textContent = 'Error: ' + e.message;
-}));
-
-document.getElementById('runTuneBtn').addEventListener('click', () => runTune().catch(e => {
-  document.getElementById('tuneStatus').textContent = 'Error: ' + e.message;
-}));
-
-document.getElementById('systemPrompt').addEventListener('input', () => schedulePreview());
-document.getElementById('userTemplate').addEventListener('input', () => schedulePreview());
-
-document.getElementById('aiProposeBtn').addEventListener('click', () => aiPropose().catch(e => {
-  document.getElementById('aiEditStatus').textContent = 'Error';
-  document.getElementById('aiError').textContent = e.message;
-}));
-document.getElementById('aiApplyBtn').addEventListener('click', () => aiApply().catch(e => {
-  document.getElementById('aiEditStatus').textContent = 'Error';
-  document.getElementById('aiError').textContent = e.message;
-}));
-document.getElementById('aiUndoBtn').addEventListener('click', () => aiUndo().catch(e => {
-  document.getElementById('aiEditStatus').textContent = 'Error';
-  document.getElementById('aiError').textContent = e.message;
-}));
-document.getElementById('aiResetBtn').addEventListener('click', () => aiReset().catch(e => {
-  document.getElementById('aiEditStatus').textContent = 'Error';
-  document.getElementById('aiError').textContent = e.message;
-}));
-
-document.getElementById('aiTargetKey').addEventListener('change', () => {
-  const _mode = document.getElementById('modeSelect').value;
-  const _sysKey = MODE_TO_PROMPT_KEY[_mode] || '';
-  const _isSys = document.getElementById('aiTargetKey').value === _sysKey;
-  document.getElementById('aiTargetSysBtn').classList.toggle('active', _isSys);
-  document.getElementById('aiTargetUserBtn').classList.toggle('active', !_isSys);
-  clearAiProposal();
-  onDraftSelected().catch(e => {
-    document.getElementById('aiError').textContent = e.message;
-  });
-});
-document.getElementById('draftSelect').addEventListener('change', () => onDraftSelected().catch(e => {
-  document.getElementById('aiError').textContent = e.message;
-}));
-document.getElementById('draftRefreshBtn').addEventListener('click', () => refreshDrafts().catch(e => {
-  document.getElementById('aiError').textContent = e.message;
-}));
-document.getElementById('draftRestoreBtn').addEventListener('click', () => restoreDraft().catch(e => {
-  document.getElementById('aiError').textContent = e.message;
-}));
-document.getElementById('promoteBtn').addEventListener('click', () => promoteToCanonical().catch(e => {
-  setPromoteStatus('Error');
-  document.getElementById('aiError').textContent = e.message;
-}));
-document.getElementById('aiChangeRequest').addEventListener('input', () => {
-  // If user changes the request, old proposal is stale.
-  document.getElementById('aiApplyBtn').disabled = true;
-});
 
 // ── Colored diff renderer ──────────────────────────────────────────────
 function renderColoredDiff(rawText, targetEl) {
@@ -1021,29 +1009,47 @@ function renderColoredDiff(rawText, targetEl) {
   }
 }
 
-// ── AI target pill toggle ─────────────────────────────────────────────
-function setAiTarget(which) {
-  document.getElementById('aiTargetSysBtn').classList.toggle('active', which === 'sys');
-  document.getElementById('aiTargetUserBtn').classList.toggle('active', which === 'user');
-  const mode = document.getElementById('modeSelect').value;
-  const sysKey = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
-  const userKey = MODE_TO_USER_TEMPLATE_KEY[mode] || 'openerUser';
-  const targetKey = which === 'sys' ? sysKey : userKey;
-  const sel = document.getElementById('aiTargetKey');
-  if ([...sel.options].some(o => o.value === targetKey)) {
-    sel.value = targetKey;
-    clearAiProposal();
-    onDraftSelected().catch(() => { });
-  }
-}
+// ── Event listeners ────────────────────────────────────────────────────
 
-// ── AI improve bar listeners ──────────────────────────────────────────
-document.getElementById('aiTargetSysBtn').addEventListener('click', () => setAiTarget('sys'));
-document.getElementById('aiTargetUserBtn').addEventListener('click', () => setAiTarget('user'));
+document.getElementById('runSuiteBtn').addEventListener('click', () =>
+  runSuite().catch(e => { document.getElementById('status').textContent = 'Error: ' + e.message; })
+);
+
+document.getElementById('userTemplate').addEventListener('input', () => schedulePreview());
+
+// Clicking read-only system prompt focuses AI input
+document.getElementById('systemPrompt').addEventListener('click', () => {
+  if (!previewPillId) document.getElementById('aiChangeRequest').focus();
+});
+
+document.getElementById('aiProposeBtn').addEventListener('click', () =>
+  aiPropose().catch(e => {
+    document.getElementById('aiEditStatus').textContent = 'Error';
+    document.getElementById('aiError').textContent = e.message;
+  })
+);
+
+document.getElementById('aiApplyBtn').addEventListener('click', () =>
+  aiApply().catch(e => {
+    document.getElementById('aiEditStatus').textContent = 'Error';
+    document.getElementById('aiError').textContent = e.message;
+  })
+);
+
 document.getElementById('aiDiscardBtn').addEventListener('click', () => {
   clearAiProposal();
   document.getElementById('aiEditStatus').textContent = '';
 });
+
+
+
+document.getElementById('aiChangeRequest').addEventListener('input', () => {
+  document.getElementById('aiApplyBtn').disabled = true;
+  // W5: keep propose button enabled only when input has text
+  const val = document.getElementById('aiChangeRequest').value.trim();
+  document.getElementById('aiProposeBtn').disabled = !val;
+});
+
 document.getElementById('aiChangeRequest').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -1054,8 +1060,51 @@ document.getElementById('aiChangeRequest').addEventListener('keydown', (e) => {
   }
 });
 
+// Compare modal
+document.getElementById('compareBaseBtn').addEventListener('click', openCompareModal);
+document.getElementById('compareModalCloseBtn').addEventListener('click', closeCompareModal);
+document.getElementById('compareModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('compareModal')) closeCompareModal();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { closeCompareModal(); exitPreviewMode(); }
+});
+
+// Version bar close button
+document.getElementById('sysVersionBarClose').addEventListener('click', exitPreviewMode);
+
+// Compare modal action buttons
+document.getElementById('compareDeleteBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('compareDeleteBtn');
+  if (!selectedComparePillId) return;
+  btn.disabled = true;
+  btn.textContent = 'Deleting\u2026';
+  const errEl = document.getElementById('compareModalError');
+  if (errEl) errEl.textContent = '';
+  try {
+    await aiDeleteVersion(selectedComparePillId);
+    closeCompareModal();
+    setPromoteStatus('Version deleted');
+  } catch (e) {
+    if (errEl) errEl.textContent = e.message;
+    btn.disabled = false;
+    btn.textContent = 'Delete version';
+  }
+});
+document.getElementById('compareResetBtn').addEventListener('click', () => {
+  closeCompareModal();
+  aiReset().catch(e => { document.getElementById('aiError').textContent = e.message; });
+});
+document.getElementById('comparePublishBtn').addEventListener('click', () => {
+  closeCompareModal();
+  promoteToCanonical().catch(e => { document.getElementById('aiEditStatus').textContent = e.message; });
+});
+
+// ── Boot ───────────────────────────────────────────────────────────────
+// W5: propose button starts disabled until user types something
+document.getElementById('aiProposeBtn').disabled = true;
+
 loadApps().catch(e => {
   document.getElementById('status').textContent = 'Error: ' + e.message;
 });
 
-loadServerInfo().catch(() => { });

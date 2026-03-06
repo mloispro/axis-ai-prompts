@@ -5,6 +5,10 @@ const port = String(process.env.WORKBENCH_PORT || '7540');
 
 module.exports = defineConfig({
     testDir: './e2e',
+    globalTeardown: './e2e/global-teardown.js',
+    // The workbench mutates local state files (candidate/history). Running in
+    // parallel across spec files can cause file-lock errors on Windows.
+    workers: 1,
     timeout: 60_000,
     expect: { timeout: 10_000 },
     use: {

@@ -23,6 +23,31 @@ A personal, public prompts repo intended to be **readable by anyone** but **writ
 - Double-click `run.bat` (repo root), OR
 - Double-click `tools/workbench-web/run.bat`
 
+## UI audit loop (finding + fixing UI issues)
+
+Use Playwright E2E as a deterministic “UI camera” to reproduce states and capture screenshots.
+
+1) Start the workbench (default: `http://127.0.0.1:7540/`).
+2) Run an audit pass (captures screenshots even when tests pass):
+```bash
+cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html
+```
+3) Review artifacts:
+- Report UI:
+```bash
+cd tools/workbench-web && npx playwright show-report playwright-report
+```
+- Raw screenshots: `tools/workbench-web/playwright-report/data/*.png`
+
+Tip: for deterministic “see the UI” review, open the PNG artifacts directly (VS Code file explorer or the Playwright report UI). If you want feedback in chat, attach the screenshot image.
+
+Turn a visual finding into a durable fix:
+- Make the smallest CSS/JS/HTML change that fixes the root cause.
+- Add/tighten a Playwright assertion in the spec that reproduces the state.
+- Re-run the audit command and confirm the screenshot/state is corrected.
+
+Note: the Playwright suite uses `dryRun: true` and does not require `OPENAI_API_KEY`.
+
 ## Safety
 - This repository is public. Don’t commit secrets or PII.
 - Never commit API keys.

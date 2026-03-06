@@ -281,13 +281,19 @@ textarea[readonly] {
 /* ── System prompt section ── */
 .sys-prompt-wrap {
   position: relative;
+  /* When the preview version bar is visible, the diff overlay must start below it.
+     JS keeps this value in sync with the bar's rendered height. */
+  --sys-overlay-top: 0px;
 }
 
 /* Diff overlay — sits on top of textarea during proposal review */
 .sys-diff-overlay {
   display: none;
   position: absolute;
-  inset: 0;
+  top: var(--sys-overlay-top);
+  right: 0;
+  bottom: 0;
+  left: 0;
   margin: 0;
   padding: 12px;
   border-radius: 8px;
@@ -305,6 +311,19 @@ textarea[readonly] {
 
 .sys-diff-overlay.visible {
   display: block;
+}
+
+/* When the preview bar is visible, visually attach it to the textarea/overlay. */
+.sys-version-bar.visible+textarea {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-top-width: 0;
+}
+
+.sys-version-bar.visible~.sys-diff-overlay {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+  border-top-width: 0;
 }
 
 /* Version bar shown when previewing a history pill (sits in flow above textarea) */

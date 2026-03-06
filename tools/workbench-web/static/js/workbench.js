@@ -184,6 +184,7 @@ function showSysDiffOverlay(rawDiff) {
     overlay.appendChild(document.createTextNode('\n'));
   }
   overlay.classList.add('visible');
+  syncSysOverlayTop();
 }
 
 function hideSysDiffOverlay() {
@@ -192,6 +193,16 @@ function hideSysDiffOverlay() {
     overlay.classList.remove('visible');
     overlay.innerHTML = '';
   }
+  syncSysOverlayTop();
+}
+
+function syncSysOverlayTop() {
+  const wrap = document.querySelector('.sys-prompt-wrap');
+  if (!wrap) return;
+
+  const bar = document.getElementById('sysVersionBar');
+  const top = (bar && bar.classList.contains('visible')) ? (bar.offsetHeight || 0) : 0;
+  wrap.style.setProperty('--sys-overlay-top', `${top}px`);
 }
 
 // ── Version pills ─────────────────────────────────────────────────────
@@ -345,6 +356,8 @@ function enterPreviewMode(id, label, text, hue) {
     bar.style.borderColor = s.borderColor;
     bar.classList.add('visible');
   }
+
+  syncSysOverlayTop();
 }
 
 function exitPreviewMode() {
@@ -361,6 +374,8 @@ function exitPreviewMode() {
     bar.style.color = '';
     bar.style.borderColor = '';
   }
+
+  syncSysOverlayTop();
 
   const currentMode = document.getElementById('modeSelect').value;
   const visibleDrafts = draftVersions.filter(v => { const vm = modeForVersion(v); return !vm || vm === currentMode; });
@@ -446,6 +461,16 @@ function renderDiffPane(el, ops, side, hue) {
 // knownText: pass already-loaded text to skip the API fetch (used for latest draft).
 async function selectComparePill(id, versionObj, knownText, versionNum) {
   selectedComparePillId = id;
+
+  // Disable delete until the selected pill finishes rendering.
+  // (Prevents acting on stale selection state or mid-load.)
+  const deleteBtn = document.getElementById('compareDeleteBtn');
+  if (deleteBtn) {
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = 'Delete version';
+    deleteBtn.title = '';
+  }
+
   document.querySelectorAll('#compareModalPills .version-pill').forEach(btn => {
     const isActive = btn.dataset.id === id;
     btn.classList.toggle('active', isActive);
@@ -479,9 +504,18 @@ async function selectComparePill(id, versionObj, knownText, versionNum) {
   const hue = versionNum !== null && versionNum !== undefined ? (versionNum - 1) % 8 : undefined;
   renderDiffPane(baseEl, ops, 'del');
   renderDiffPane(currentEl, ops, 'add', hue);
+
+  // Now that the selected draft is rendered, enable delete.
+  if (deleteBtn) {
+    deleteBtn.disabled = !(selectedComparePillId && selectedComparePillId !== '__base__');
+    deleteBtn.title = deleteBtn.disabled ? 'Base cannot be deleted.' : 'Delete the selected saved version.';
+  }
 }
 
 function openCompareModal() {
+  // Reset selection each time the modal opens to avoid stale ids.
+  selectedComparePillId = null;
+
   const currentMode = document.getElementById('modeSelect').value;
   const visibleDrafts = draftVersions.filter(v => { const vm = modeForVersion(v); return !vm || vm === currentMode; });
 
@@ -511,13 +545,20 @@ function openCompareModal() {
   // Sync action button states
   const deleteBtn = document.getElementById('compareDeleteBtn');
   const publishBtn = document.getElementById('comparePublishBtn');
-  if (deleteBtn) deleteBtn.disabled = draftVersions.length === 0;
+  if (deleteBtn) {
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = 'Delete version';
+    deleteBtn.title = visibleDrafts.length ? 'Select a version to delete.' : 'No saved versions to delete.';
+  }
   if (publishBtn) {
     publishBtn.disabled = !latestSuiteIsClean;
     publishBtn.title = latestSuiteIsClean
       ? 'Publish candidate \u2192 canonical prompts file'
       : 'Run the suite first (all fixtures must pass)';
   }
+
+  const errEl = document.getElementById('compareModalError');
+  if (errEl) errEl.textContent = '';
 
   document.getElementById('compareModal').style.display = 'flex';
 
@@ -542,6 +583,16 @@ function openCompareModal() {
 
 function closeCompareModal() {
   document.getElementById('compareModal').style.display = 'none';
+
+  selectedComparePillId = null;
+  const errEl = document.getElementById('compareModalError');
+  if (errEl) errEl.textContent = '';
+  const deleteBtn = document.getElementById('compareDeleteBtn');
+  if (deleteBtn) {
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = 'Delete version';
+    deleteBtn.title = '';
+  }
 }
 
 // ── Draft refresh + Publish ───────────────────────────────────────────
@@ -716,6 +767,9 @@ async function aiApply() {
 }
 
 async function aiDeleteVersion(draftId) {
+  clearAiProposal();
+  const status = document.getElementById('aiEditStatus');
+  status.textContent = 'Deleting version\u2026';
   const appId = document.getElementById('appSelect').value;
   await api('/api/drafts/delete', {
     method: 'POST',
@@ -727,6 +781,7 @@ async function aiDeleteVersion(draftId) {
   syncFieldsFromCandidate(cand);
   schedulePreview();
   await refreshDrafts();
+  status.textContent = 'Version deleted';
 }
 
 async function aiUndo() {
@@ -742,7 +797,7 @@ async function aiUndo() {
   const cand = await (await api('/api/candidate-prompts?appId=' + encodeURIComponent(appId))).json();
   syncFieldsFromCandidate(cand);
   schedulePreview();
-  status.textContent = 'Version deleted';
+  status.textContent = 'Undone';
   await refreshDrafts();
 }
 
@@ -1076,10 +1131,17 @@ document.getElementById('sysVersionBarClose').addEventListener('click', exitPrev
 // Compare modal action buttons
 document.getElementById('compareDeleteBtn').addEventListener('click', async () => {
   const btn = document.getElementById('compareDeleteBtn');
-  if (!selectedComparePillId) return;
+  const errEl = document.getElementById('compareModalError');
+  if (!selectedComparePillId) {
+    if (errEl) errEl.textContent = 'Select a saved version to delete.';
+    return;
+  }
+  if (selectedComparePillId === '__base__') {
+    if (errEl) errEl.textContent = 'Base cannot be deleted.';
+    return;
+  }
   btn.disabled = true;
   btn.textContent = 'Deleting\u2026';
-  const errEl = document.getElementById('compareModalError');
   if (errEl) errEl.textContent = '';
   try {
     await aiDeleteVersion(selectedComparePillId);

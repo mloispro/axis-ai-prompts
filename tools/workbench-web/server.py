@@ -131,7 +131,11 @@ def _read_history(app_id: str) -> List[Dict[str, Any]]:
 
 def _write_history(app_id: str, items: List[Dict[str, Any]]) -> None:
     p = _history_path(app_id)
-    p.write_text(json.dumps(items, indent=2), encoding="utf-8")
+    # Atomic write: avoids readers seeing a partially-written JSON file.
+    # FastAPI may serve concurrent requests in multiple threads.
+    tmp = p.with_name(p.name + f".tmp.{uuid.uuid4().hex}")
+    tmp.write_text(json.dumps(items, indent=2), encoding="utf-8")
+    tmp.replace(p)
 
 
 def _push_undo_snapshot(app_id: str, candidate_obj: Any, reason: str) -> None:

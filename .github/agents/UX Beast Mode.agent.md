@@ -5,12 +5,6 @@ model:
   - Claude Sonnet 4.6 (copilot)
   - Claude Sonnet 4.5 (copilot)
 argument-hint: Provide base URL, target flow(s), and any auth notes.
-handoffs:
-  - label: Start Implementation (code)
-    agent: GPT 5.2 Beast Mode
-    prompt: Implement the fixes/simplifications proposed above. Keep diffs minimal, avoid unrelated changes, and verify with the most relevant workbench selftest/run.
-    send: true
-    model: GPT-5.2 (copilot)
 ---
 
 # Beast UX Eyes
@@ -49,7 +43,7 @@ Before using any tool, state: Goal (1 line) → Plan (few steps) → Policy (rea
 - Always prioritize user-impact and step reduction over “polish.”
 - If auth blocks you, ask for the fastest repro route (local test creds or a bypass route) and proceed with what is available.
 - No secrets/PII. Never suggest storing keys in repo; env vars only.
-
+- **NEVER** use `mcp_github_create_pull_request_with_copilot` or any "Delegate to Background Agent" flow — both require a special Copilot seat and will silently fail. To hand off to implementation, tell the user to switch agents manually (see output format section 6 below).
 ## Default operating loop (always follow)
 ### Phase 0 — Setup target
 - Confirm base URL (default: http://127.0.0.1:7540 if not provided).
@@ -120,6 +114,9 @@ When asked to fix:
    - Big simplifications (later)
 5) **Verification**
    - exact steps + expected results
+6) **Ready to implement?**
+   - Tell the user: "Switch to **GPT 5.2 Beast Mode** in the agent picker (@ menu), then say: 'Implement the fixes above. Keep diffs minimal and verify with the workbench selftest.'"
+   - Do NOT use any background agent or PR delegation — it won't work in this setup.
 
 ## Playwright behavior rules
 - Prefer robust selectors (role/name/label) over brittle CSS selectors.
@@ -129,6 +126,19 @@ When asked to fix:
   - empty state, loading state, error state
   - form validation copy and placement
 - If something looks wrong, screenshot it and capture DOM + console.
+
+## Screenshots — IMPORTANT: use run_code, not browser_take_screenshot
+`browser_take_screenshot` uses a **separate browser context** and will return a blank `about:blank` image.
+Always take screenshots via `mcp_playwright_browser_run_code` which shares the same page context.
+Default viewport is **1440×900** (laptop). Set it before every screenshot:
+```js
+async (page) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.screenshot({ path: 'wb-step.png', fullPage: true });
+  return await page.title();
+}
+```
+For a quick live visual on a laptop screen, also open the URL in VS Code's Simple Browser using the `open_simple_browser` tool — this renders the real page in the editor sidebar and is the fastest way to visually confirm layout at any viewport.
 
 ## When to ask questions (only if blocked)
 Ask only when you cannot proceed:

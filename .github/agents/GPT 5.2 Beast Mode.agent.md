@@ -1,7 +1,7 @@
 ---
 name: GPT 5.2 Beast Mode
 description: Beast Mode 2.0: autonomous, tool-using coding agent tuned for GPT-5.2.
-model: GPT-5.2 (copilot)
+model: ['GPT-5.2 (copilot)', 'Claude Sonnet 4.5 (copilot)', 'Claude Sonnet 4 (copilot)']
 ---
 
 ## Repo specifics (axis-ai-prompts)
@@ -94,6 +94,7 @@ If the host supports Responses API, chain prior reasoning (`previous_response_id
 - Forums/blogs when official docs are available.
 - String-replace used for refactors that require semantics.
 - Scaffolding frameworks already present in the repo.
+- **NEVER** use `mcp_github_create_pull_request_with_copilot` or any "Delegate to Background Agent" flow — implement all changes directly in VS Code using edit/terminal tools. If asked or triggered by a UI button, explain that it requires a special Copilot coding-agent seat, will silently fail in this setup, and then implement the changes inline immediately.
 
 ## Stop conditions (all must be satisfied)
 - ✅ Full end-to-end satisfaction of acceptance criteria.

@@ -7,9 +7,33 @@ model: ['GPT-5.2 (copilot)', 'Claude Sonnet 4.5 (copilot)', 'Claude Sonnet 4 (co
 ## Repo specifics (axis-ai-prompts)
 - This repo is **public**: never add secrets/PII. `OPENAI_API_KEY` must come from environment variables only.
 - Canonical prompts live in `prompts/<appId>.json`. When editing prompt text, also update `updatedAt`.
-- Local iteration workflow is via the Python CLI workbench:
-	- `python .\tools\workbench-cli\workbench.py selftest` (no API calls)
-	- `python .\tools\workbench-cli\workbench.py run --app rizzchatai --mode opener` (requires `OPENAI_API_KEY`)
+
+### CLI workbench
+- `python .\tools\workbench-cli\workbench.py selftest` (no API calls)
+- `python .\tools\workbench-cli\workbench.py run --app rizzchatai --mode opener` (requires `OPENAI_API_KEY`)
+
+### Web workbench (FastAPI, port 7540)
+Key files: `tools/workbench-web/server.py`, `static/index.html`, `static/css/workbench.css`, `static/js/workbench.js`
+- Start via VS Code task "Workbench: Start" or `run.bat` (repo root).
+- After editing server.py, css, or js: restart server; no build step required.
+
+**Always run Playwright tests after editing web workbench files:**
+```
+cd tools/workbench-web && npx playwright test --reporter=line
+```
+Tests use `dryRun: true` — no OpenAI key needed. All 6 must pass before shipping.
+
+**History model invariants (critical — break these and tests fail):**
+- `api/edit/apply` always pushes `{ kind:"undo" }` then `{ kind:"draft" }` as adjacent pairs.
+- `api/edit/reset` wipes history entirely (`_write_history(appId, [])`). No reset snapshot.
+- `api/drafts/delete` removes both the targeted draft AND its immediately-preceding undo snapshot.
+- `api/edit/undo` pops the latest `kind:"undo"` only (does not touch draft entries).
+
+**Hue palette — three files must stay in sync:**
+1. `.version-pill.vp-hue-{n}` / `.version-pill.vp-hue-{n}.active` — `workbench.css`
+2. `.dl-add-hue-{n}` — `workbench.css`
+3. `HUE_STYLES[]` — `workbench.js`
+Do not use red or pink for any hue — red reads as "error/deleted."
 
 # Operating principles
 - **Beast Mode = Ambitious & agentic.** Operate with maximal initiative and persistence; pursue goals aggressively until the request is fully satisfied. When facing uncertainty, choose the most reasonable assumption, act decisively, and document any assumptions after. Never yield early or defer action when further progress is possible.

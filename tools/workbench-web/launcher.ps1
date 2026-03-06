@@ -252,7 +252,9 @@ function Start-Detached([int]$fixedPort, [bool]$useReload) {
     $argList += @(
         '--host', $HostAddress,
         '--port', "$fixedPort",
-        '--log-level', 'info'
+        '--log-level', 'info',
+        '--timeout-keep-alive', '30',
+        '--timeout-graceful-shutdown', '10'
     )
 
     $proc = Start-Process -FilePath $pythonExe -WorkingDirectory $root -ArgumentList $argList -RedirectStandardOutput $logFileOut -RedirectStandardError $logFileErr -PassThru
@@ -448,7 +450,9 @@ function Start-Background([int]$startPort) {
         '-m', 'uvicorn', 'server:app',
         '--host', '127.0.0.1',
         '--port', "$portChosen",
-        '--log-level', 'info'
+        '--log-level', 'info',
+        '--timeout-keep-alive', '30',
+        '--timeout-graceful-shutdown', '10'
     ) -RedirectStandardOutput $logFileOut -RedirectStandardError $logFileErr -PassThru
 
     $ok = Wait-HttpOk -url ("http://127.0.0.1:$portChosen/api/apps") -timeoutSeconds $StartupTimeoutSeconds
@@ -519,10 +523,10 @@ function Start-Foreground([int]$fixedPort, [bool]$useReload) {
     Start-OpenWhenReadyJob -apiUrl $apiUrl -homeUrl $openUrl -timeoutSeconds $OpenTimeoutSeconds
 
     if ($useReload) {
-        & $pythonExe -m uvicorn server:app --reload --host $HostAddress --port $fixedPort --log-level info
+        & $pythonExe -m uvicorn server:app --reload --host $HostAddress --port $fixedPort --log-level info --timeout-keep-alive 30 --timeout-graceful-shutdown 10
     }
     else {
-        & $pythonExe -m uvicorn server:app --host $HostAddress --port $fixedPort --log-level info
+        & $pythonExe -m uvicorn server:app --host $HostAddress --port $fixedPort --log-level info --timeout-keep-alive 30 --timeout-graceful-shutdown 10
     }
 }
 

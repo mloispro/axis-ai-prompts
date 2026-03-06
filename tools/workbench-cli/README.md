@@ -50,6 +50,23 @@ Outputs go to `out/<timestamp>/...`.
 - `out/<runId>/manifest.json`
 - `out/<runId>/<fixtureName>.txt`
 
+## Keeping `out/` from growing forever
+
+The desktop CLI writes one timestamped folder per run under the repo-root `out/` directory.
+
+By default, the CLI auto-prunes old run folders after each command finishes (safe default: keep last 10 runs).
+
+You can disable or tune this via env vars:
+
+- `WORKBENCH_CLI_OUT_AUTOPRUNE=0` (disable)
+- `WORKBENCH_CLI_OUT_KEEP_LAST=10`
+- `WORKBENCH_CLI_OUT_KEEP_DAYS=0`
+
+These CLI-specific vars fall back to the shared knobs if set:
+- `WORKBENCH_OUT_AUTOPRUNE`
+- `WORKBENCH_OUT_KEEP_LAST`
+- `WORKBENCH_OUT_KEEP_DAYS`
+
 ## Safety
 
 - Reads `OPENAI_API_KEY` from environment.

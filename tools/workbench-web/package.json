@@ -7,6 +7,7 @@
     "scripts": {
         "e2e:setup": "npm install && npx playwright install",
         "e2e:install": "npx playwright install",
-        "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\e2e.ps1"
+        "e2e": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\e2e.ps1",
+        "out:prune": "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\prune-out.ps1"
     }
 }

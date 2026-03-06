@@ -119,3 +119,39 @@ Or via npm:
 After a test run the history file is cleared — this is expected.
 Always re-run after editing `server.py`, `workbench.js`, `workbench.css`, or `index.html`.
 
+## Playwright UI audit mode (screenshots on success)
+
+Generate audit artifacts (screenshots even when tests pass):
+- `cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html`
+
+Run only the audit-focused subset (tests tagged with `@audit`):
+- `cd tools/workbench-web && E2E_AUDIT=1 npx playwright test -g "@audit" --reporter=line,html`
+
+Where outputs go:
+- Checklist: `tools/workbench-web/out/audit/audit-findings.md`
+- Stable artifacts: `tools/workbench-web/out/audit/audit_*.png`
+- Playwright report UI: `cd tools/workbench-web && npx playwright show-report playwright-report`
+
+## Keeping `out/` from growing forever
+
+`tools/workbench-web/out/` is gitignored, but it can grow large on disk because the engine writes one timestamped folder per run.
+
+By default, the workbench auto-prunes old run folders after each suite run (safe default: keep last 10 runs).
+
+You can disable or tune this via env vars:
+- `WORKBENCH_OUT_AUTOPRUNE=0` (disable)
+- `WORKBENCH_OUT_KEEP_LAST=10`
+- `WORKBENCH_OUT_KEEP_DAYS=0`
+
+Recommended: if you ever want to prune manually (same defaults as auto-prune):
+
+- Preview what would be deleted:
+  - `cd tools/workbench-web && powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\prune-out.ps1 -WhatIf`
+- Actually delete old runs:
+  - `cd tools/workbench-web && npm run out:prune`
+
+Optional knobs:
+- Keep fewer runs: `... -File .\scripts\prune-out.ps1 -KeepLast 15`
+- Keep fewer days: `... -File .\scripts\prune-out.ps1 -KeepDays 7`
+- Also prune trace files: `... -File .\scripts\prune-out.ps1 -PruneTraces`
+

@@ -5,7 +5,7 @@ const {
     auditScreenshot,
 } = require('../helpers/workbenchTest');
 
-test('dry-run AI editor propose/apply/undo works without API key', async ({ page }) => {
+test('dry-run AI editor propose/apply/undo works without API key @audit', async ({ page }) => {
     await gotoAndWaitForBootstrap(page);
 
     await auditScreenshot(page, test.info(), 'ai_editor_ready');

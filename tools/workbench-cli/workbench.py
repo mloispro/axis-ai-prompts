@@ -43,6 +43,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import time
 import urllib.error
 import urllib.request
@@ -69,6 +70,120 @@ OUT_DIR = REPO_ROOT / "out"
 
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 DEFAULT_MODEL = "gpt-4o-mini"
+
+
+def _env_truthy(cli_name: str, shared_name: str, default: str = "") -> bool:
+    v = os.environ.get(cli_name)
+    if v is None or str(v).strip() == "":
+        v = os.environ.get(shared_name)
+    if v is None or str(v).strip() == "":
+        v = default
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+
+def _env_int(cli_name: str, shared_name: str, default: int) -> int:
+    v = os.environ.get(cli_name)
+    if v is None or str(v).strip() == "":
+        v = os.environ.get(shared_name)
+    if v is None or str(v).strip() == "":
+        return int(default)
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return int(default)
+
+
+_RUN_DIR_RE = re.compile(r"^\d{8}_\d{6}Z?$")
+
+
+def _parse_run_dir_timestamp(name: str) -> Optional[_dt.datetime]:
+    for fmt in ("%Y%m%d_%H%M%SZ", "%Y%m%d_%H%M%S"):
+        try:
+            return _dt.datetime.strptime(name, fmt).replace(tzinfo=_dt.timezone.utc)
+        except Exception:
+            continue
+    return None
+
+
+def _auto_prune_cli_out(out_base: pathlib.Path) -> None:
+    """Keep repo-root out/ bounded by pruning older CLI run folders.
+
+    Best-effort only (never fail a run). Prunes only directories that look like
+    run IDs (YYYYMMDD_HHMMSSZ) and contain a manifest.json somewhere under them.
+
+    Defaults:
+    - enabled
+    - keep last 10 run IDs
+
+    Env overrides (CLI-specific, with shared fallbacks):
+    - WORKBENCH_CLI_OUT_AUTOPRUNE (fallback: WORKBENCH_OUT_AUTOPRUNE)
+    - WORKBENCH_CLI_OUT_KEEP_LAST (fallback: WORKBENCH_OUT_KEEP_LAST)
+    - WORKBENCH_CLI_OUT_KEEP_DAYS (fallback: WORKBENCH_OUT_KEEP_DAYS)
+    """
+
+    try:
+        if not _env_truthy(
+            "WORKBENCH_CLI_OUT_AUTOPRUNE", "WORKBENCH_OUT_AUTOPRUNE", default="1"
+        ):
+            return
+
+        keep_last = max(
+            0,
+            _env_int("WORKBENCH_CLI_OUT_KEEP_LAST", "WORKBENCH_OUT_KEEP_LAST", 10),
+        )
+        keep_days = max(
+            0,
+            _env_int("WORKBENCH_CLI_OUT_KEEP_DAYS", "WORKBENCH_OUT_KEEP_DAYS", 0),
+        )
+        if keep_last == 0 and keep_days == 0:
+            return
+
+        if not out_base.exists() or not out_base.is_dir():
+            return
+
+        cutoff = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=keep_days)
+
+        runs: List[Tuple[_dt.datetime, pathlib.Path]] = []
+        for p in out_base.iterdir():
+            try:
+                if not p.is_dir():
+                    continue
+                if not _RUN_DIR_RE.match(p.name):
+                    continue
+                dt = _parse_run_dir_timestamp(p.name)
+                if dt is None:
+                    continue
+                # Safety: require at least one manifest.json under this run ID.
+                if not any(p.rglob("manifest.json")):
+                    continue
+                runs.append((dt, p))
+            except Exception:
+                continue
+
+        if not runs:
+            return
+
+        runs.sort(key=lambda t: t[0], reverse=True)
+
+        keep: set[str] = set()
+        if keep_last > 0:
+            for _, p in runs[:keep_last]:
+                keep.add(str(p.resolve()))
+        if keep_days > 0:
+            for dt, p in runs:
+                if dt >= cutoff:
+                    keep.add(str(p.resolve()))
+
+        for _, p in runs:
+            if str(p.resolve()) in keep:
+                continue
+            try:
+                shutil.rmtree(p)
+            except Exception:
+                pass
+    except Exception:
+        return
 
 
 def _utc_run_id() -> str:
@@ -471,6 +586,7 @@ def cmd_run(args: argparse.Namespace) -> pathlib.Path:
 
 def cmd_run_entry(args: argparse.Namespace) -> int:
     cmd_run(args)
+    _auto_prune_cli_out(OUT_DIR)
     return 0
 
 
@@ -558,6 +674,7 @@ def cmd_ab(args: argparse.Namespace) -> int:
 
     print(f"\nA/B diff written to: {diff_dir}")
     print(json.dumps(summary, indent=2))
+    _auto_prune_cli_out(OUT_DIR)
     return 0
 
 
@@ -591,6 +708,7 @@ def cmd_selftest(_args: argparse.Namespace) -> int:
     if not txts:
         raise SystemExit("Selftest failed: no output .txt files written")
     print("Selftest OK")
+    _auto_prune_cli_out(OUT_DIR)
     return 0
 
 

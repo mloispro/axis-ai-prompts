@@ -6,7 +6,7 @@ const {
     auditA11ySnapshot,
 } = require('../helpers/workbenchTest');
 
-test('compare modal opens with base text and closes', async ({ page }) => {
+test('compare modal opens with base text and closes @audit', async ({ page }) => {
     await gotoAndWaitForBootstrap(page);
 
     const appSelect = page.locator('#appSelect');

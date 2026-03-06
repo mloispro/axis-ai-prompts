@@ -5,7 +5,7 @@ const {
     auditScreenshot,
 } = require('../helpers/workbenchTest');
 
-test('responsive layout: editors stack on narrow screens', async ({ page }) => {
+test('responsive layout: editors stack on narrow screens @audit', async ({ page }) => {
     const systemPrompt = page.locator('#systemPrompt');
     const userTemplate = page.locator('#userTemplate');
 

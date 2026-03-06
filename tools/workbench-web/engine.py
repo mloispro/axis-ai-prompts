@@ -43,6 +43,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -93,6 +94,93 @@ def _utc_now_iso() -> str:
 
 def _utc_timestamp_slug() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+
+def _env_truthy(name: str, default: str = "") -> bool:
+    v = os.getenv(name)
+    if v is None or str(v).strip() == "":
+        v = default
+    s = str(v).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    v = os.getenv(name)
+    if v is None or str(v).strip() == "":
+        return int(default)
+    try:
+        return int(str(v).strip())
+    except Exception:
+        return int(default)
+
+
+def _auto_prune_out_runs(out_base: Path) -> None:
+    """Keep out/ bounded by pruning older engine run folders.
+
+    Best-effort only (never fail a run). Prunes only directories that match the
+    timestamp slug pattern YYYYMMDD_HHMMSS and contain run.json.
+
+    Defaults:
+    - enabled (WORKBENCH_OUT_AUTOPRUNE=1)
+    - keep last 10 runs (WORKBENCH_OUT_KEEP_LAST)
+    """
+
+    try:
+        if not _env_truthy("WORKBENCH_OUT_AUTOPRUNE", default="1"):
+            return
+
+        keep_last = max(0, _env_int("WORKBENCH_OUT_KEEP_LAST", 10))
+        keep_days = max(0, _env_int("WORKBENCH_OUT_KEEP_DAYS", 0))
+        if keep_last == 0 and keep_days == 0:
+            return
+
+        if not out_base.exists() or not out_base.is_dir():
+            return
+
+        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(
+            days=keep_days
+        )
+
+        slug_re = re.compile(r"^\d{8}_\d{6}$")
+        runs: List[Tuple[datetime.datetime, Path]] = []
+        for p in out_base.iterdir():
+            try:
+                if not p.is_dir():
+                    continue
+                if not slug_re.match(p.name):
+                    continue
+                if not (p / "run.json").exists():
+                    continue
+                dt = datetime.datetime.strptime(p.name, "%Y%m%d_%H%M%S").replace(
+                    tzinfo=datetime.timezone.utc
+                )
+                runs.append((dt, p))
+            except Exception:
+                continue
+
+        if not runs:
+            return
+
+        runs.sort(key=lambda t: t[0], reverse=True)
+
+        keep: set[str] = set()
+        if keep_last > 0:
+            for _, p in runs[:keep_last]:
+                keep.add(str(p.resolve()))
+        if keep_days > 0:
+            for dt, p in runs:
+                if dt >= cutoff:
+                    keep.add(str(p.resolve()))
+
+        for _, p in runs:
+            if str(p.resolve()) in keep:
+                continue
+            try:
+                shutil.rmtree(p)
+            except Exception:
+                pass
+    except Exception:
+        return
 
 
 def _sha256_text(text: str) -> str:
@@ -1072,10 +1160,10 @@ def write_ab_report_html(
         diff_file = item.get("diffFile") or ""
 
         btxt = base.get("output") or (
-            "[ERROR] " + base.get("error") if base.get("error") else ""
+            "[ERROR] " + str(base.get("error")) if base.get("error") else ""
         )
         ctxt = cand.get("output") or (
-            "[ERROR] " + cand.get("error") if cand.get("error") else ""
+            "[ERROR] " + str(cand.get("error")) if cand.get("error") else ""
         )
 
         bflags = ",".join(base.get("flags") or [])
@@ -1459,6 +1547,7 @@ def main_argv(argv: Sequence[str]) -> int:
             write_text(out_root / "summary.json", json.dumps(results, indent=2))
             print(f"Out={out_root}")
             print("Done")
+            _auto_prune_out_runs(out_base)
             return 0
 
         # A/B dry run
@@ -1597,6 +1686,7 @@ def main_argv(argv: Sequence[str]) -> int:
         write_text(out_root / "ab_summary.json", json.dumps(diff_index, indent=2))
         print(f"Out={out_root}")
         print("Done")
+        _auto_prune_out_runs(out_base)
         return 0
 
     # Real run requires key
@@ -1640,6 +1730,7 @@ def main_argv(argv: Sequence[str]) -> int:
             )
             for p in fixture_files
         ]
+        fixture_input_by_name = {name: inp for name, inp in fixtures}
 
         manifest.update(
             {
@@ -1682,6 +1773,7 @@ def main_argv(argv: Sequence[str]) -> int:
                 print("  OUTPUT:")
                 print("  " + "\n  ".join(str(out_txt).splitlines()))
         print("Done")
+        _auto_prune_out_runs(out_base)
         return 0
 
     # A/B mode
@@ -1828,10 +1920,10 @@ def main_argv(argv: Sequence[str]) -> int:
             print("  " + "\n  ".join(str(inp).splitlines()))
 
         bout = b.get("output") or (
-            "[ERROR] " + b.get("error") if b.get("error") else ""
+            "[ERROR] " + str(b.get("error")) if b.get("error") else ""
         )
         cout = c.get("output") or (
-            "[ERROR] " + c.get("error") if c.get("error") else ""
+            "[ERROR] " + str(c.get("error")) if c.get("error") else ""
         )
 
         if bout:
@@ -1850,6 +1942,7 @@ def main_argv(argv: Sequence[str]) -> int:
         _try_open_path(report if report.exists() else out_root)
 
     print("Done")
+    _auto_prune_out_runs(out_base)
     return 0
 
 

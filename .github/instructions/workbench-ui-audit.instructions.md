@@ -14,9 +14,16 @@ applyTo: "tools/workbench-web/**"
 2) **Generate audit artifacts (screenshots even on success)**
 - `cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html`
 
+Optional: run only the audit-focused subset (faster to review screenshots):
+- `cd tools/workbench-web && E2E_AUDIT=1 npx playwright test -g "@audit" --reporter=line,html`
+
 3) **Inspect what the UI looks like**
 - Report UI: `cd tools/workbench-web && npx playwright show-report playwright-report`
 - Raw screenshots: `tools/workbench-web/playwright-report/data/*.png`
+
+Stable audit outputs (recommended for quick review + sharing paths):
+- Checklist: `tools/workbench-web/out/audit/audit-findings.md`
+- Artifacts: `tools/workbench-web/out/audit/audit_*.png` and `tools/workbench-web/out/audit/audit_*.a11y.*`
 
 Notes:
 - The `data/*.png` files are content-addressed; use the report UI to map *which* PNG corresponds to which test/state.

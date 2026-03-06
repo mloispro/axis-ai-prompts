@@ -147,6 +147,21 @@ Add a convention where some specs are tagged as audit-focused:
 - Run subset (fast): core assertions only
 - Run audit (slower): assertions + screenshots for every state (plus any best-effort extra artifacts)
 
+Status (2026-03-06): ✅ implemented
+
+- Audit-focused specs are tagged with `@audit` in the test title.
+- Audit mode writes stable artifacts to `tools/workbench-web/out/audit/` and generates a checklist.
+
+Audit commands:
+
+- Full suite + audit artifacts: `cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html`
+- Audit subset only: `cd tools/workbench-web && E2E_AUDIT=1 npx playwright test -g "@audit" --reporter=line,html`
+
+Outputs:
+
+- Checklist: `tools/workbench-web/out/audit/audit-findings.md`
+- Artifacts: `tools/workbench-web/out/audit/audit_*.png` (+ optional `audit_*.a11y.*`)
+
 Conceptually, audit mode should:
 
 - capture screenshots even when tests pass
@@ -248,8 +263,14 @@ Verification:
 
 ## Next steps
 
-- Add new states to the audit matrix (multi-draft color cycling, mode switching, publish eligibility states).
-- Keep running: `cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html`
+State-matrix expansion is now implemented (2026-03-06):
+
+- Multi-draft hue cycling + preview-bar hue consistency: `tools/workbench-web/e2e/specs/07_multi_draft_hues.spec.js`
+- Mode switching (history pills filter by mode): `tools/workbench-web/e2e/specs/08_mode_switching_pills.spec.js`
+- Publish eligibility (disabled until a clean suite run): `tools/workbench-web/e2e/specs/09_publish_eligibility.spec.js`
+
+Keep running audit passes:
+- `cd tools/workbench-web && E2E_AUDIT=1 npx playwright test --reporter=line,html`
 
 ---
 

@@ -6,7 +6,7 @@ const {
     auditA11ySnapshot,
 } = require('../helpers/workbenchTest');
 
-test('loads apps, models, and prompt editors', async ({ page }) => {
+test('loads apps, models, and prompt editors @audit', async ({ page }) => {
     await gotoAndWaitForBootstrap(page);
 
     await auditScreenshot(page, test.info(), 'fresh_load');

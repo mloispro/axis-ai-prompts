@@ -135,7 +135,16 @@ def _write_history(app_id: str, items: List[Dict[str, Any]]) -> None:
     # FastAPI may serve concurrent requests in multiple threads.
     tmp = p.with_name(p.name + f".tmp.{uuid.uuid4().hex}")
     tmp.write_text(json.dumps(items, indent=2), encoding="utf-8")
-    tmp.replace(p)
+    # Windows can transiently deny renames if another thread/process has the
+    # file open (AV scanners, editors, or overlapping requests). Retry briefly.
+    for attempt in range(6):
+        try:
+            tmp.replace(p)
+            break
+        except PermissionError:
+            if attempt >= 5:
+                raise
+            time.sleep(0.05 * (attempt + 1))
 
 
 def _push_undo_snapshot(app_id: str, candidate_obj: Any, reason: str) -> None:
@@ -1337,13 +1346,17 @@ def api_drafts_delete(payload: Dict[str, Any]) -> JSONResponse:
 
 @app.get("/api/drafts")
 def api_drafts(appId: str = "") -> JSONResponse:
-    """List local edit history versions (newest-first) and latest suite status."""
+    """List local edit history versions (oldest-first) and latest suite status.
+
+    The web client assigns version numbers based on list order:
+    v1 = oldest, vN = newest.
+    """
 
     _ensure_state_dirs()
     app_id = (appId or "").strip() or _default_app_id()
 
     items = _read_history(app_id)
-    drafts = list(reversed(_draft_entries(items)))
+    drafts = _draft_entries(items)
 
     # Show post-apply snapshots (including dry-run edits).
     # Dry-run is commonly used when no API key is configured, and users still

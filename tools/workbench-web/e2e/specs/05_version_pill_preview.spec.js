@@ -6,7 +6,7 @@ const {
     auditA11ySnapshot,
 } = require('../helpers/workbenchTest');
 
-test('version pill preview shows version bar and can be dismissed', async ({ page }) => {
+test('version pill preview shows version bar and can be dismissed @audit', async ({ page }) => {
     await gotoAndWaitForBootstrap(page);
 
     const appSelect = page.locator('#appSelect');

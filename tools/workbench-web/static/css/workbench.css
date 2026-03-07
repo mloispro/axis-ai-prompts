@@ -242,6 +242,7 @@ textarea[readonly] {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-height: 0;
 }
 
 .section-label {
@@ -251,6 +252,20 @@ textarea[readonly] {
   letter-spacing: 0.05em;
   color: #999;
   margin-bottom: 5px;
+}
+
+/* Label row with an inline action button (e.g. System Prompt + AI edit). */
+.sys-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sys-label-left {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
 }
 
 .section-label-hint {
@@ -279,11 +294,160 @@ textarea[readonly] {
 }
 
 /* ── System prompt section ── */
+.sys-prompt-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
 .sys-prompt-wrap {
   position: relative;
   /* When the preview version bar is visible, the diff overlay must start below it.
      JS keeps this value in sync with the bar's rendered height. */
   --sys-overlay-top: 0px;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+/* Inline AI button (opens AI editor modal). */
+.sys-ai-fab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.sys-ai-icon {
+  font-size: 13px;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+
+.sys-ai-fab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* The system prompt should take the remaining vertical space responsively. */
+#systemPrompt {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  resize: none;
+}
+
+/* ── User template disclosure (minimized by default) ── */
+.user-template-section {
+  margin: 0;
+  padding: 0;
+}
+
+.user-template-section>summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.user-template-section>summary::-webkit-details-marker {
+  display: none;
+}
+
+.user-template-section>summary::marker {
+  content: '';
+}
+
+.user-template-section>summary::after {
+  content: 'Show';
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: none;
+  letter-spacing: 0;
+  color: #bbb;
+}
+
+.user-template-section[open]>summary::after {
+  content: 'Hide';
+}
+
+.user-template-body {
+  margin-top: 0;
+}
+
+.user-template-section[open] #userTemplate {
+  /* Keep it usable but prevent it from stealing the whole column. */
+  max-height: 35vh;
+}
+
+/* ── AI editor modal ── */
+.ai-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 110;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  backdrop-filter: blur(2px);
+}
+
+.ai-modal-inner {
+  background: var(--surface);
+  border-radius: 14px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+  width: 100%;
+  max-width: 760px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.ai-modal-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px 10px 18px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.ai-modal-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #444;
+}
+
+.ai-modal-subtitle {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ai-modal-close {
+  border: none;
+  background: none;
+  font-size: 18px;
+  color: var(--muted);
+  cursor: pointer;
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.ai-modal-close:hover {
+  background: #f0f0f0;
+  color: var(--text);
+}
+
+.ai-modal-body {
+  padding: 14px 16px;
+  overflow: auto;
 }
 
 /* Diff overlay — sits on top of textarea during proposal review */

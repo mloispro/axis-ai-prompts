@@ -32,6 +32,14 @@ test('loads apps, models, and prompt editors @audit', async ({ page }) => {
     const isReadOnly = await systemPrompt.getAttribute('readonly');
     expect(isReadOnly).not.toBeNull();
 
+    // Floating AI button should be present on the system prompt.
+    await expect(page.locator('#sysAiFab')).toBeVisible();
+
+    // User template is minimized by default (expandable disclosure).
+    await expect(page.locator('#userTemplateSection')).toBeVisible();
+    await expect(page.locator('#userTemplateSection > summary')).toBeVisible();
+    await expect(page.locator('#userTemplate')).toBeHidden();
+    await page.locator('#userTemplateSection > summary').click();
     await expect(page.locator('#userTemplate')).toBeVisible();
     await expect(page.locator('#fixtureSelect')).toBeVisible();
 

@@ -12,7 +12,7 @@ The audit harness + suite structure is implemented.
 
 - Test structure:
   - `tools/workbench-web/e2e/helpers/workbenchTest.js`
-  - `tools/workbench-web/e2e/specs/*.spec.js` (6 specs)
+  - `tools/workbench-web/e2e/specs/*.spec.js` (multiple specs; see list below)
   - `tools/workbench-web/e2e/global-teardown.js`
 - Config:
   - `tools/workbench-web/playwright.config.js` uses `workers: 1` (Windows stability) and global teardown
@@ -92,6 +92,7 @@ We need a deliberate list of states that represent meaningful UX transitions, no
 6. Compare modal open (base vs current)
 7. Compare modal open + delete version (delete button behavior, pill removed)
 8. Undo behavior (if present in UI; confirm semantics + messaging)
+9. Deep scroll + switch WIP pills (ensure interaction + scroll behavior stays sane)
 
 ---
 
@@ -132,6 +133,10 @@ Current suite layout (implemented):
   - `04_compare_modal.spec.js`
   - `05_version_pill_preview.spec.js`
   - `06_responsive_layout.spec.js`
+  - `07_multi_draft_hues.spec.js`
+  - `08_mode_switching_pills.spec.js`
+  - `09_publish_eligibility.spec.js`
+  - `10_pill_scroll_switching.spec.js`
 
 This layout is the baseline. Any new “state capture” should be:
 - one helper (if reusable)
@@ -258,6 +263,129 @@ Fix:
 
 Verification:
 - Playwright preview-mode spec opens the compare modal while the overlay is visible.
+
+---
+
+### P0 — WIP overlay blocks primary “click prompt to edit” affordance
+
+Symptom:
+- When default WIP highlighting is visible (sys diff overlay shown on top of the textarea), the overlay can intercept clicks.
+- This makes “click prompt to edit” unreliable, even though the UI hint says “click prompt or AI Edit”.
+
+Why it matters:
+- It makes the editor feel broken/unresponsive and forces users to hunt for the button.
+
+Proposed fix:
+- Ensure the default WIP overlay does not block the textarea’s primary interaction.
+- Implementation options (pick smallest that preserves intended interactivity):
+  - Make default WIP overlay `pointer-events: none` (recommended if overlay is purely decorative), OR
+  - Forward overlay clicks to the same handler as the textarea (open the AI modal), while preserving selection/scroll.
+
+Verification:
+- Add/keep a regression check: with drafts present and default WIP highlighting visible, clicking in the prompt surface opens the AI modal.
+- Audit screenshots to review: `audit_pill_scroll_*_bottom.png` (deep-scrolled state).
+
+---
+
+### P0 — Async highlight render can race when switching pills quickly
+
+Symptom:
+- Clicking v3 → v2 → v1 quickly can produce laggy or incorrect overlay state if snapshot fetch + highlight render completes out of order.
+
+Why it matters:
+- Users lose trust: the active pill may not match the visible attribution/highlight.
+
+Proposed fix:
+- Add a render generation token (or abort controller) so only the most recent highlight request can update the overlay.
+- Discard stale async completions.
+
+Verification:
+- Add a Playwright “rapid pill switching” regression:
+  - Rapidly click several pills and assert the final visible state (active pill + preview/liveness + overlay classes) matches the last click.
+
+---
+
+### P0 — Preview overlay shows red deletions + “duplicate” lines for some versions (v2)
+
+Symptom:
+- When previewing certain pills (observed: v2), the overlay includes deletion ops styled as `dl-del` (red).
+- When a line is modified, the overlay can show both the old (deleted) line and the new (added) line, which reads like duplicated text in the system prompt.
+- This also breaks the “preview should match pill hue” expectation (v2 preview should feel amber; red text is misleading).
+
+Root cause:
+- Preview mode overlay is currently rendered from a base→snapshot line diff that includes `del` ops.
+- Those `del` ops do not exist in the previewed snapshot text, so showing them in an overlay that sits on top of the textarea both:
+  - introduces visually duplicated content, and
+  - risks scroll/line alignment confusion.
+
+Proposed fix:
+- In preview-mode overlay rendering, do not render deletion ops as visible lines.
+  - Minimum change: treat `del` ops as “skip” (omit) so only context + additions are shown.
+  - Optional follow-up: if we need deletion visibility, show it only in the compare modal (where side-by-side makes sense), not on top of the textarea.
+- Ensure preview-mode overlay uses only hue-styled additions (`dl-add-hue-{n}`) and neutral context (`dl-ctx`) so the visual language matches the active pill.
+
+Verification:
+- Add/extend a Playwright regression that previews v2 and asserts:
+  - No `dl-del` spans are present in the sys overlay while previewing.
+  - Overlay line count stays aligned with the preview textarea content (no “extra” deletion-only lines).
+- Audit screenshots to review: `audit_pill_scroll_preview_v2_bottom.png`.
+
+---
+
+### P1 — Switching WIP pills while deep-scrolled is disorienting
+
+Symptom:
+- If the user scrolls far down and switches pills, scrollTop stays the same but the underlying content changes.
+- This can feel like the viewport “teleports” to unrelated content, or appears to not change at all if edits are elsewhere.
+
+Why it matters:
+- This is a high-frequency workflow when reviewing changes across multiple WIP versions.
+
+Proposed fix (choose one explicitly):
+- Option A (simplest): reset scroll to top on any pill switch (preview enter/exit and WIP switches).
+- Option B (more advanced): preserve scroll only when the target text is comparable; otherwise clamp scroll and show a subtle “jumped” hint.
+
+Verification:
+- Add audit screenshots for:
+  - latest WIP bottom,
+  - preview v2 bottom,
+  - back to latest WIP bottom,
+  and confirm the behavior is consistent with the chosen option.
+
+---
+
+### P1 — Default WIP highlighting mode lacks a clear state label
+
+Symptom:
+- Preview mode has a visible “Previewing: …” version bar.
+- Default WIP highlighting has no equivalent indicator, so users can’t easily tell whether they’re in preview or just seeing latest-WIP attribution.
+
+Why it matters:
+- Contributes to confusion when switching pills and while deep-scrolled.
+
+Proposed fix:
+- Add a lightweight, clearly non-preview indicator for default WIP highlighting (e.g. “WIP highlighted (latest)” in the label row).
+- Must not look like preview mode (no “close to exit preview” semantics unless explicitly added).
+
+Verification:
+- Add a Playwright assertion: with drafts present and not previewing, the WIP indicator is visible; when previewing, the preview bar is visible instead.
+
+---
+
+### P2 — Highlight readability: large added blocks become noisy
+
+Symptom:
+- When the overlay highlights many contiguous lines, it becomes zebra-striped, which is hard to scan.
+
+Why it matters:
+- The feature meant to improve review can reduce readability.
+
+Proposed fix:
+- Reduce highlight visual weight:
+  - prefer a left gutter marker, thin border, or block-level grouping instead of full-row fills.
+
+Verification:
+- Audit screenshot of a long added block remains readable (no high-contrast striping dominating the text).
 
 ---
 

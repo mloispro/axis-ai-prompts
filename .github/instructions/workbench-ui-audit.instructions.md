@@ -37,6 +37,11 @@ Notes:
 - Add or tighten a Playwright assertion + named screenshot in the spec covering that state.
 - Re-run the same audit command and confirm the state is fixed.
 
+Rubric for consistent review:
+- `tools/workbench-web/UX_AUDIT_RUBRIC.md`
+
+Ownership note (this repo): there are no separate human reviewers; GitHub Copilot is expected to run this audit loop and apply fixes.
+
 ## Guardrails
 
 - Public repo: never add secrets/PII; keys must stay in environment vars only.

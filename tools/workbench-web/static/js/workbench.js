@@ -7,6 +7,10 @@ let draftVersions = [];
 let latestSuite = null;
 let latestSuiteIsClean = false;
 
+// Cache: appId::targetKey::draftId -> snapshotText
+// Used for per-version WIP highlighting without repeated fetches.
+const draftSnapshotCache = new Map();
+
 // Text of the "Base" version for the current mode key (populated on load)
 let baseSystemText = '';
 // Full prompts object from the canonical baseline (cached to allow mode-switch re-derive)
@@ -78,7 +82,9 @@ function candidateFromFields() {
 
   const mode = document.getElementById('modeSelect').value;
   const key = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
-  prompts[key] = document.getElementById('systemPrompt').value || '';
+  // systemPrompt is read-only and is also used to display preview snapshots.
+  // Never serialize candidate state from the previewed textarea value.
+  prompts[key] = currentSystemText || '';
 
   const userKey = MODE_TO_USER_TEMPLATE_KEY[mode];
   if (userKey) prompts[userKey] = document.getElementById('userTemplate').value || '';
@@ -142,7 +148,14 @@ function clearAiProposal() {
   document.querySelector('.ai-bar')?.classList.remove('ai-bar--reviewing');
   document.getElementById('aiError').textContent = '';
   document.getElementById('aiApplyBtn').disabled = true;
-  hideSysDiffOverlay();
+  // The system prompt overlay is used for multiple purposes:
+  // - AI proposal diff (unified-diff style with @@ headers)
+  // - Version pill preview diff (colored line diff)
+  // - Default WIP highlighting (latest pill hue)
+  // Clearing an AI proposal should only hide the AI-proposal overlay.
+  const overlay = document.getElementById('sysPromptDiffOverlay');
+  const hasAiHeader = !!overlay?.querySelector('span.dl-hdr');
+  if (hasAiHeader) hideSysDiffOverlay();
 }
 
 function aiNotesFromProposal(p) {
@@ -203,6 +216,41 @@ function syncSysOverlayTop() {
   const bar = document.getElementById('sysVersionBar');
   const top = (bar && bar.classList.contains('visible')) ? (bar.offsetHeight || 0) : 0;
   wrap.style.setProperty('--sys-overlay-top', `${top}px`);
+}
+
+// ── AI editor modal ─────────────────────────────────────────────────
+function isAiModalOpen() {
+  const modal = document.getElementById('aiModal');
+  return !!(modal && modal.style.display !== 'none');
+}
+
+function openAiModal() {
+  // Editing is always for the live candidate.
+  exitPreviewMode();
+
+  // Opening the modal should feel like a fresh run: clear previous request/diff/errors.
+  clearAiProposal();
+  const proposeBtn = document.getElementById('aiProposeBtn');
+  if (proposeBtn) {
+    proposeBtn.classList.remove('loading');
+    proposeBtn.disabled = true;
+  }
+
+  const modal = document.getElementById('aiModal');
+  if (!modal) return;
+  modal.style.display = 'flex';
+  const inputEl = document.getElementById('aiChangeRequest');
+  if (inputEl) {
+    inputEl.disabled = false;
+    inputEl.value = '';
+    setTimeout(() => inputEl.focus(), 0);
+  }
+}
+
+function closeAiModal() {
+  const modal = document.getElementById('aiModal');
+  if (!modal) return;
+  modal.style.display = 'none';
 }
 
 // ── Version pills ─────────────────────────────────────────────────────
@@ -332,9 +380,12 @@ function enterPreviewMode(id, label, text, hue) {
     if (overlay) {
       overlay.innerHTML = '';
       for (const op of ops) {
+        // In preview-mode overlays, deletions don't exist in the snapshot text,
+        // so rendering them creates duplicate-looking/red lines and misaligns.
+        // Deletions remain visible in the compare modal.
+        if (op.type === 'del') continue;
         const s = document.createElement('span');
-        if (op.type === 'del') s.className = 'dl-del';
-        else if (op.type === 'add') s.className = hue !== undefined ? `dl-add-hue-${hue}` : 'dl-add';
+        if (op.type === 'add') s.className = hue !== undefined ? `dl-add-hue-${hue}` : 'dl-add';
         else s.className = 'dl-ctx';
         s.textContent = op.text;
         overlay.appendChild(s);
@@ -380,6 +431,165 @@ function exitPreviewMode() {
   const currentMode = document.getElementById('modeSelect').value;
   const visibleDrafts = draftVersions.filter(v => { const vm = modeForVersion(v); return !vm || vm === currentMode; });
   updateActivePill(visibleDrafts.length ? String(visibleDrafts[visibleDrafts.length - 1].id || '') : '__base__');
+
+  // Return to the default WIP highlight state (latest pill highlighted) when drafts exist.
+  if (visibleDrafts.length) applyLatestWipHighlight(visibleDrafts);
+}
+
+// Default state: when drafts exist, keep the latest pill active and show a colored overlay
+// highlighting changes vs Base in that pill's hue (without entering preview mode).
+function applyLatestWipHighlight(visibleDrafts) {
+  if (!Array.isArray(visibleDrafts) || !visibleDrafts.length) {
+    hideSysDiffOverlay();
+    updateActivePill('__base__');
+    return;
+  }
+
+  const latest = visibleDrafts[visibleDrafts.length - 1];
+  const vNum = visibleDrafts.length;
+  const hue = (vNum - 1) % 8;
+  const latestId = String(latest?.id || '');
+  if (latestId) updateActivePill(latestId);
+
+  // Ensure we're not showing the preview bar in default-highlight state.
+  const bar = document.getElementById('sysVersionBar');
+  if (bar) {
+    bar.classList.remove('visible');
+    bar.style.background = '';
+    bar.style.color = '';
+    bar.style.borderColor = '';
+  }
+
+  const ops = computeLineDiff(baseSystemText, currentSystemText);
+  const overlay = document.getElementById('sysPromptDiffOverlay');
+  if (!overlay) return;
+
+  overlay.innerHTML = '';
+  for (const op of ops) {
+    // Default/WIP overlay renders on top of the *current* prompt.
+    // Skip deletions so overlay line-count matches the live textarea.
+    if (op.type === 'del') continue;
+    const s = document.createElement('span');
+    if (op.type === 'add') s.className = `dl-add-hue-${hue}`;
+    else s.className = 'dl-ctx';
+    s.textContent = op.text;
+    overlay.appendChild(s);
+    overlay.appendChild(document.createTextNode('\n'));
+  }
+  overlay.classList.add('visible');
+  syncSysOverlayTop();
+}
+
+function _incCount(map, key) {
+  map.set(key, (map.get(key) || 0) + 1);
+}
+
+function _decCount(map, key) {
+  const n = map.get(key) || 0;
+  if (n <= 1) map.delete(key);
+  else map.set(key, n - 1);
+}
+
+async function getDraftSnapshotText(appId, draftId, targetKey) {
+  const k = `${appId}::${targetKey}::${draftId}`;
+  if (draftSnapshotCache.has(k)) return draftSnapshotCache.get(k);
+
+  const d = await (await api(
+    '/api/drafts/diff?appId=' + encodeURIComponent(appId) +
+    '&id=' + encodeURIComponent(draftId) +
+    '&targetKey=' + encodeURIComponent(targetKey)
+  )).json();
+  const text = (d && typeof d.snapshotText === 'string') ? d.snapshotText : '';
+  draftSnapshotCache.set(k, text);
+  return text;
+}
+
+async function applyLatestWipHighlightAsync(visibleDrafts) {
+  if (!Array.isArray(visibleDrafts) || !visibleDrafts.length) {
+    applyLatestWipHighlight(visibleDrafts);
+    return;
+  }
+
+  const CAP = 12;
+  if (visibleDrafts.length > CAP) {
+    applyLatestWipHighlight(visibleDrafts);
+    return;
+  }
+
+  const appId = document.getElementById('appSelect').value;
+  const mode = document.getElementById('modeSelect').value;
+  const targetKey = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
+
+  // Fetch snapshots oldest->newest so we can attribute added lines to the version that introduced them.
+  const snapshots = await Promise.all(
+    visibleDrafts.map(v => getDraftSnapshotText(appId, String(v.id || ''), targetKey))
+  );
+
+  const baseText = String(baseSystemText || '');
+  const baseRemaining = new Map();
+  for (const ln of baseText.split('\n')) _incCount(baseRemaining, ln);
+
+  // Track (per version) how many times each line was newly added.
+  const addedCountsPerVersion = [];
+  let prevText = baseText;
+  for (let k = 0; k < snapshots.length; k++) {
+    const nextText = String(snapshots[k] || '');
+    const ops = computeLineDiff(prevText, nextText);
+    const addCounts = new Map();
+    for (const op of ops) {
+      if (op.type === 'add') _incCount(addCounts, op.text);
+    }
+    addedCountsPerVersion.push(addCounts);
+    prevText = nextText;
+  }
+
+  const overlay = document.getElementById('sysPromptDiffOverlay');
+  if (!overlay) return;
+
+  const latest = visibleDrafts[visibleDrafts.length - 1];
+  const latestId = String(latest?.id || '');
+  if (latestId) updateActivePill(latestId);
+
+  // Default-highlight state: no preview bar.
+  const bar = document.getElementById('sysVersionBar');
+  if (bar) {
+    bar.classList.remove('visible');
+    bar.style.background = '';
+    bar.style.color = '';
+    bar.style.borderColor = '';
+  }
+
+  // Render overlay aligned to current prompt lines so highlights map cleanly.
+  const currentLines = String(currentSystemText || '').split('\n');
+  overlay.innerHTML = '';
+  for (const ln of currentLines) {
+    const span = document.createElement('span');
+
+    const baseCount = baseRemaining.get(ln) || 0;
+    if (baseCount > 0) {
+      _decCount(baseRemaining, ln);
+      span.className = 'dl-ctx';
+    } else {
+      let assignedHue = null;
+      for (let k = 0; k < addedCountsPerVersion.length; k++) {
+        const c = addedCountsPerVersion[k].get(ln) || 0;
+        if (c > 0) {
+          assignedHue = k % 8;
+          _decCount(addedCountsPerVersion[k], ln);
+          break;
+        }
+      }
+      if (assignedHue === null) assignedHue = (visibleDrafts.length - 1) % 8;
+      span.className = `dl-add-hue-${assignedHue}`;
+    }
+
+    span.textContent = ln;
+    overlay.appendChild(span);
+    overlay.appendChild(document.createTextNode('\n'));
+  }
+
+  overlay.classList.add('visible');
+  syncSysOverlayTop();
 }
 
 async function restorePreviewedPill() {
@@ -612,6 +822,15 @@ async function refreshDrafts() {
   const currentMode = document.getElementById('modeSelect').value;
   const visibleDrafts = draftVersions.filter(v => { const vm = modeForVersion(v); return !vm || vm === currentMode; });
   rebuildPills(visibleDrafts);
+
+  // UX: default to latest WIP highlighting unless the user is actively previewing a pill.
+  if (!previewPillId) {
+    try {
+      await applyLatestWipHighlightAsync(visibleDrafts);
+    } catch (_) {
+      applyLatestWipHighlight(visibleDrafts);
+    }
+  }
 }
 
 async function promoteToCanonical() {
@@ -634,6 +853,8 @@ async function promoteToCanonical() {
 
 // ── AI propose / apply / undo / reset ────────────────────────────────
 async function aiPropose() {
+  // Proposing a change is always for the live candidate, not a preview snapshot.
+  exitPreviewMode();
   clearAiProposal();
   setAiAppliedInfo('');
   const status = document.getElementById('aiEditStatus');
@@ -716,6 +937,8 @@ async function aiPropose() {
 }
 
 async function aiApply() {
+  // Applying a proposal always targets the live candidate.
+  exitPreviewMode();
   const status = document.getElementById('aiEditStatus');
   const proposal = aiLastProposal;
   if (!proposal || proposal.status !== 'ok' || proposal.selfCheck !== true) {
@@ -758,6 +981,10 @@ async function aiApply() {
 
   clearAiProposal();
   schedulePreview();
+
+  // UX: once Apply succeeds, return to the main editor.
+  // (Suite/status continues in the footer.)
+  closeAiModal();
   await refreshDrafts(); // Show new pill immediately before suite run
 
   status.textContent = 'Applied; running suite\u2026';
@@ -1072,9 +1299,21 @@ document.getElementById('runSuiteBtn').addEventListener('click', () =>
 
 document.getElementById('userTemplate').addEventListener('input', () => schedulePreview());
 
-// Clicking read-only system prompt focuses AI input
+// Clicking read-only system prompt opens the AI editor modal
 document.getElementById('systemPrompt').addEventListener('click', () => {
-  if (!previewPillId) document.getElementById('aiChangeRequest').focus();
+  openAiModal();
+});
+
+// Floating AI button on system prompt
+document.getElementById('sysAiFab').addEventListener('click', (e) => {
+  e.preventDefault();
+  openAiModal();
+});
+
+// AI modal close behaviors
+document.getElementById('aiModalCloseBtn').addEventListener('click', closeAiModal);
+document.getElementById('aiModal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('aiModal')) closeAiModal();
 });
 
 document.getElementById('aiProposeBtn').addEventListener('click', () =>
@@ -1122,7 +1361,14 @@ document.getElementById('compareModal').addEventListener('click', (e) => {
   if (e.target === document.getElementById('compareModal')) closeCompareModal();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { closeCompareModal(); exitPreviewMode(); }
+  if (e.key === 'Escape') {
+    if (isAiModalOpen()) {
+      closeAiModal();
+      return;
+    }
+    closeCompareModal();
+    exitPreviewMode();
+  }
 });
 
 // Version bar close button

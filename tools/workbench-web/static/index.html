@@ -42,8 +42,15 @@
 
         <!-- System Prompt -->
         <div class="sys-prompt-section">
-          <div class="section-label">System Prompt <span class="section-label-hint">AI-managed · click prompt to edit
-              via AI</span></div>
+          <div class="section-label sys-label-row">
+            <span class="sys-label-left">System Prompt <span class="section-label-hint">AI-managed · click prompt or AI
+                Edit</span></span>
+            <button id="sysAiFab" class="btn btn-sm btn-apply sys-ai-fab" type="button" aria-label="Open AI editor"
+              title="Edit via AI">
+              <span class="sys-ai-icon" aria-hidden="true">✎</span>
+              AI Edit
+            </button>
+          </div>
           <!-- textarea wrapper for overlay positioning -->
           <div class="sys-prompt-wrap">
             <!-- Version bar shown when previewing a history pill (sits above textarea) -->
@@ -52,8 +59,8 @@
               <button id="sysVersionBarClose" class="sys-version-bar-close" type="button"
                 aria-label="Exit preview">✕</button>
             </div>
-            <textarea id="systemPrompt" readonly placeholder="System prompt…" style="min-height:380px" rows="8"
-              spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
+            <textarea id="systemPrompt" readonly placeholder="System prompt…" rows="8" spellcheck="false"
+              autocorrect="off" autocapitalize="off"></textarea>
             <!-- diff overlay shown during proposal review -->
             <pre id="sysPromptDiffOverlay" class="sys-diff-overlay" aria-hidden="true"></pre>
           </div>
@@ -67,34 +74,15 @@
           </div>
         </div>
 
-        <!-- AI bar (system-prompt only, no toggle) -->
-        <div class="ai-bar-section">
-          <div class="ai-bar">
-            <div class="ai-bar-row">
-              <input class="ai-bar-input" id="aiChangeRequest" type="text" aria-label="Describe your change"
-                placeholder="Describe the change… (Enter to run)" />
-              <button class="ai-run-btn" id="aiProposeBtn" type="button" title="Propose improvement">&#9654;</button>
-            </div>
-            <div id="aiDiffWrap">
-              <div class="diff-area" id="aiDiff"></div>
-              <div class="ai-action-row">
-                <button class="btn btn-sm btn-apply" id="aiApplyBtn" type="button" disabled>Apply</button>
-                <button class="btn btn-ghost btn-sm" id="aiDiscardBtn" type="button">Discard</button>
-              </div>
-            </div>
-            <div class="ai-persistent-row">
-              <span class="ai-status flex-1" id="aiAppliedInfo"></span>
-              <span class="ai-err" id="aiError"></span>
-            </div>
+        <!-- User Template (collapsed by default so System Prompt gets the space) -->
+        <details class="user-template-section" id="userTemplateSection">
+          <summary class="section-label user-template-summary">User Template <span class="section-label-hint">manually
+              editable</span></summary>
+          <div class="user-template-body">
+            <textarea id="userTemplate" placeholder="User prompt template…" rows="8" spellcheck="false"
+              autocorrect="off" autocapitalize="off"></textarea>
           </div>
-        </div>
-
-        <!-- User Template -->
-        <div>
-          <div class="section-label">User Template <span class="section-label-hint">manually editable</span></div>
-          <textarea id="userTemplate" placeholder="User prompt template…" style="min-height:100px" rows="8"
-            spellcheck="false" autocorrect="off" autocapitalize="off"></textarea>
-        </div>
+        </details>
 
         <!-- hidden fields still needed by JS engine -->
         <pre id="aiNotes" style="display:none"></pre>
@@ -179,6 +167,40 @@
             <button class="btn btn-danger-outline btn-sm" id="compareDeleteBtn" type="button">Delete version</button>
           </div>
           <pre id="compareCurrentText" class="compare-pre" tabindex="0"></pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── AI editor modal ── -->
+  <div id="aiModal" class="ai-modal" style="display:none" role="dialog" aria-modal="true" aria-label="AI Editor">
+    <div class="ai-modal-inner">
+      <div class="ai-modal-header">
+        <span class="ai-modal-title">AI Editor</span>
+        <span class="ai-modal-subtitle">describe a change, then run</span>
+        <div class="flex-1"></div>
+        <button class="ai-modal-close" id="aiModalCloseBtn" type="button" aria-label="Close">✕</button>
+      </div>
+      <div class="ai-modal-body">
+        <div class="section-label" id="aiBarLabel">AI Editor <span class="section-label-hint">describe a change, then
+            run</span></div>
+        <div class="ai-bar">
+          <div class="ai-bar-row">
+            <input class="ai-bar-input" id="aiChangeRequest" type="text" aria-label="Describe your change"
+              placeholder="Describe the change… (Enter to run)" />
+            <button class="ai-run-btn" id="aiProposeBtn" type="button" title="Propose improvement">&#9654;</button>
+          </div>
+          <div id="aiDiffWrap">
+            <div class="diff-area" id="aiDiff"></div>
+            <div class="ai-action-row">
+              <button class="btn btn-sm btn-apply" id="aiApplyBtn" type="button" disabled>Apply</button>
+              <button class="btn btn-ghost btn-sm" id="aiDiscardBtn" type="button">Discard</button>
+            </div>
+          </div>
+          <div class="ai-persistent-row">
+            <span class="ai-status flex-1" id="aiAppliedInfo"></span>
+            <span class="ai-err" id="aiError"></span>
+          </div>
         </div>
       </div>
     </div>

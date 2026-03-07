@@ -8,8 +8,6 @@ const {
 test('dry-run AI editor propose/apply/undo works without API key @audit', async ({ page }) => {
     await gotoAndWaitForBootstrap(page);
 
-    await auditScreenshot(page, test.info(), 'ai_editor_ready');
-
     const appSelect = page.locator('#appSelect');
     await expect.poll(async () => await appSelect.locator('option').count()).toBeGreaterThan(0);
     const modeSelect = page.locator('#modeSelect');
@@ -42,6 +40,14 @@ test('dry-run AI editor propose/apply/undo works without API key @audit', async 
     const nonBasePills = page.locator('#versionPills .version-pill:not(.base-pill)');
     await expect.poll(async () => await nonBasePills.count()).toBe(0);
 
+    // Open the AI editor modal (either system prompt click or floating button).
+    await page.locator('#systemPrompt').click();
+    await expect(page.locator('#aiModal')).toBeVisible();
+    await expect(page.locator('#aiBarLabel')).toBeVisible();
+    await expect(page.locator('#aiBarLabel')).toContainText('AI');
+
+    await auditScreenshot(page, test.info(), 'ai_editor_ready');
+
     // The AI bar always targets the system prompt in the new UI — no target toggle needed.
     const openerMarker = 'e2e-opener-marker';
     await page.locator('#aiChangeRequest').fill(openerMarker);
@@ -55,10 +61,22 @@ test('dry-run AI editor propose/apply/undo works without API key @audit', async 
     const before = await page.locator('#systemPrompt').inputValue();
 
     await page.locator('#aiApplyBtn').click();
-    await expect(page.locator('#aiEditStatus')).toContainText('Applied');
-    await expect(page.locator('#status')).toContainText('Done');
+    // Workflow contract: Apply should return you to the main editor automatically.
+    await expect(page.locator('#aiModal')).not.toBeVisible();
+    // Apply triggers an async suite run; wait for the final state to avoid races
+    // where later status updates overwrite delete-status assertions.
+    await expect(page.locator('#aiEditStatus')).toContainText('suite done');
 
     await auditScreenshot(page, test.info(), 'after_apply_creates_version');
+
+    // Workflow contract: after apply, latest WIP pill is active and highlights are visible.
+    const versionBar = page.locator('#sysVersionBar');
+    await expect(versionBar).not.toBeVisible();
+    await expect(page.locator('#versionPills .version-pill.active:not(.base-pill)')).toHaveCount(1);
+    await expect(page.locator('#sysPromptDiffOverlay')).toBeVisible();
+    await expect
+        .poll(async () => await page.locator('#sysPromptDiffOverlay span[class^="dl-add-hue-"]').count())
+        .toBeGreaterThan(0);
 
     // The system prompt must contain DRY_RUN_EDIT after apply.
     const afterApply = await page.locator('#systemPrompt').inputValue();
@@ -92,13 +110,26 @@ test('dry-run AI editor propose/apply/undo works without API key @audit', async 
         await modeSelect.selectOption('app_chat');
         await page.waitForTimeout(200);
 
+        // Re-open AI editor modal for app_chat edit.
+        await page.locator('#sysAiFab').click();
+        await expect(page.locator('#aiModal')).toBeVisible();
+
         const appChatMarker = 'e2e-app-chat-marker';
         await page.locator('#aiChangeRequest').fill(appChatMarker);
         await page.locator('#aiProposeBtn').click();
         await expect(page.locator('#aiDiff')).toContainText('DRY_RUN_EDIT');
         await expect(page.locator('#aiApplyBtn')).toBeEnabled();
         await page.locator('#aiApplyBtn').click();
-        await expect(page.locator('#aiEditStatus')).toContainText('Applied');
+        await expect(page.locator('#aiModal')).not.toBeVisible();
+        await expect(page.locator('#aiEditStatus')).toContainText('suite done');
+
+        // Workflow contract: after apply, latest WIP is selected and highlighted.
+        await expect(page.locator('#sysVersionBar')).not.toBeVisible();
+        await expect(page.locator('#versionPills .version-pill.active:not(.base-pill)')).toHaveCount(1);
+        await expect(page.locator('#sysPromptDiffOverlay')).toBeVisible();
+        await expect
+            .poll(async () => await page.locator('#sysPromptDiffOverlay span[class^="dl-add-hue-"]').count())
+            .toBeGreaterThan(0);
 
         // Verify the app_chat system prompt actually contains the dry-run edit.
         // (We use poll because apply triggers an async suite run before updating the textarea)

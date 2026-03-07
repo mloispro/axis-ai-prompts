@@ -461,6 +461,13 @@ def propose_prompt_edit(
                 "warnings": ["dry_run"],
                 "selfCheck": False,
                 "refusalReason": "; ".join(errors),
+                "modelUsed": model,
+                "usage": {
+                    "inputTokens": 0,
+                    "outputTokens": 0,
+                    "totalTokens": 0,
+                    "cachedTokens": 0,
+                },
             }
         return {
             "status": "ok",
@@ -470,13 +477,28 @@ def propose_prompt_edit(
             "warnings": ["dry_run"],
             "selfCheck": True,
             "refusalReason": "",
+            "modelUsed": model,
+            "usage": {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "totalTokens": 0,
+                "cachedTokens": 0,
+            },
         }
 
     ensure_api_key()
 
+    # Tracing is enabled by default so users can always inspect what was sent/returned
+    # without needing to remember flags. Disable with WORKBENCH_TRACE_AI=0.
+    trace_enabled = _env_truthy("WORKBENCH_TRACE_AI", default="1")
+    trace_keep_last = max(0, _env_int("WORKBENCH_TRACE_AI_KEEP_LAST", 10))
+    trace_slug = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
+
     from openai import OpenAI
 
     client = OpenAI()
+
+    openai_request_id: str = ""
 
     user_payload = {
         "targetKey": target_key,
@@ -521,7 +543,72 @@ def propose_prompt_edit(
         "text": {"format": _PROMPT_EDIT_FORMAT_V1},
     }
 
+    def _write_trace_artifact(label: str, text: str) -> str:
+        if not trace_enabled:
+            return ""
+        try:
+            web_root = Path(__file__).resolve().parent
+            out_dir = web_root / "out" / "traces"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            safe_id = (trace_id or "trace").replace("/", "_").replace("\\", "_")
+            p = out_dir / f"{label}_{safe_id}_{trace_slug}.txt"
+            p.write_text(text, encoding="utf-8")
+            return str(p)
+        except Exception:
+            return ""
+
+    def _write_trace_json(label: str, obj: Any) -> str:
+        if not trace_enabled:
+            return ""
+        try:
+            payload = json.dumps(obj, indent=2, ensure_ascii=False, default=str)
+        except Exception:
+            payload = str(obj)
+        return _write_trace_artifact(label, payload)
+
+    def _auto_prune_traces() -> None:
+        """Best-effort: keep last N traces (by meta file mtime), delete older siblings."""
+
+        if not trace_enabled:
+            return
+        if trace_keep_last <= 0:
+            return
+
+        try:
+            web_root = Path(__file__).resolve().parent
+            out_dir = web_root / "out" / "traces"
+            if not out_dir.exists():
+                return
+
+            metas = [p for p in out_dir.glob("edit_response_meta_*.txt") if p.is_file()]
+            metas.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            keep = metas[:trace_keep_last]
+
+            keep_keys = set()
+            for p in keep:
+                parts = p.stem.rsplit("_", 2)
+                if len(parts) != 3:
+                    continue
+                _label, safe_id, ts = parts
+                keep_keys.add((safe_id, ts))
+
+            for p in [x for x in out_dir.glob("*.txt") if x.is_file()]:
+                parts = p.stem.rsplit("_", 2)
+                if len(parts) != 3:
+                    continue
+                _label, safe_id, ts = parts
+                if (safe_id, ts) in keep_keys:
+                    continue
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+        except Exception:
+            # Never fail the edit flow due to trace housekeeping.
+            return
+
     def _create(*, max_tokens: int, include_temperature: bool) -> Any:
+        nonlocal openai_request_id
         create_kwargs = dict(base_kwargs)
         create_kwargs["max_output_tokens"] = int(max_tokens)
         if include_temperature and not _model_rejects_temperature(model):
@@ -541,6 +628,7 @@ def propose_prompt_edit(
                 except Exception:
                     req_id = None
                 if req_id:
+                    openai_request_id = str(req_id)
                     _LOG.info(
                         "edit.propose.openai trace_id=%s request_id=%s",
                         trace_id or "-",
@@ -564,6 +652,14 @@ def propose_prompt_edit(
                     )
                     if with_raw is not None:
                         raw_resp = with_raw.create(**create_kwargs)
+                        try:
+                            req_id = raw_resp.headers.get(
+                                "x-request-id"
+                            ) or raw_resp.headers.get("x-openai-request-id")
+                        except Exception:
+                            req_id = None
+                        if req_id:
+                            openai_request_id = str(req_id)
                         return raw_resp.parse()
                     return client.responses.create(**create_kwargs)
                 except Exception as e2:
@@ -578,6 +674,7 @@ def propose_prompt_edit(
             raise RuntimeError(f"OpenAI editor request failed: {msg}")
 
     resp = _create(max_tokens=max_output_tokens, include_temperature=True)
+    resp_used = resp
 
     raw = getattr(resp, "output_text", None)
     if not isinstance(raw, str) or not raw.strip():
@@ -589,20 +686,30 @@ def propose_prompt_edit(
         len(raw),
     )
 
-    def _write_trace_artifact(label: str, text: str) -> str:
-        try:
-            web_root = Path(__file__).resolve().parent
-            out_dir = web_root / "out" / "traces"
-            out_dir.mkdir(parents=True, exist_ok=True)
-            safe_id = (trace_id or "trace").replace("/", "_").replace("\\", "_")
-            ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
-            p = out_dir / f"{label}_{safe_id}_{ts}.txt"
-            p.write_text(text, encoding="utf-8")
-            return str(p)
-        except Exception:
-            return ""
+    # Optional trace artifacts for debugging (off by default).
+    trace_request_path = ""
+    trace_raw_path = ""
+    trace_parsed_path = ""
+    trace_meta_path = ""
+    if trace_enabled:
+        trace_request_path = _write_trace_json(
+            "edit_request",
+            {
+                "traceId": trace_id,
+                "model": model,
+                "targetKey": target_key,
+                "maxOutputTokens": max_output_tokens,
+                "userPayload": user_payload,
+                "systemPrompt": _EDITOR_SYSTEM_PROMPT,
+            },
+        )
+        trace_raw_path = _write_trace_artifact(
+            "edit_response_raw",
+            f"trace_id={trace_id}\nmodel={model}\ntarget_key={target_key}\nopenai_request_id={openai_request_id or '-'}\n\nRAW:\n{raw}\n",
+        )
 
     def _try_parse_or_retry(first_raw: str) -> Dict[str, Any]:
+        nonlocal resp_used
         try:
             parsed = json.loads(first_raw)
             return parsed if isinstance(parsed, dict) else {"_non_dict": parsed}
@@ -633,6 +740,7 @@ def propose_prompt_edit(
                 if isinstance(raw2, str) and raw2.strip():
                     try:
                         parsed2 = json.loads(raw2)
+                        resp_used = resp2
                         return (
                             parsed2
                             if isinstance(parsed2, dict)
@@ -660,33 +768,129 @@ def propose_prompt_edit(
 
     obj = _try_parse_or_retry(raw)
 
+    if trace_enabled:
+        trace_parsed_path = _write_trace_json("edit_response_parsed", obj)
+
     if not isinstance(obj, dict):
         raise RuntimeError("OpenAI editor returned non-object JSON")
+
+    def _extract_usage_dict(r: Any) -> Dict[str, int]:
+        usage_obj = getattr(r, "usage", None)
+        if usage_obj is None:
+            return {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "totalTokens": 0,
+                "cachedTokens": 0,
+            }
+
+        def _get_int(u: Any, key: str) -> int:
+            try:
+                if isinstance(u, dict):
+                    v = u.get(key)
+                else:
+                    v = getattr(u, key, None)
+                return int(v or 0)
+            except Exception:
+                return 0
+
+        input_tokens = _get_int(usage_obj, "input_tokens")
+        output_tokens = _get_int(usage_obj, "output_tokens")
+        total_tokens = _get_int(usage_obj, "total_tokens")
+        if total_tokens <= 0:
+            total_tokens = max(0, input_tokens + output_tokens)
+
+        cached_tokens = 0
+        try:
+            details = (
+                usage_obj.get("input_tokens_details")
+                if isinstance(usage_obj, dict)
+                else getattr(usage_obj, "input_tokens_details", None)
+            )
+            if details is not None:
+                cached_tokens = _get_int(details, "cached_tokens")
+            else:
+                cached_tokens = _get_int(usage_obj, "cached_tokens")
+        except Exception:
+            cached_tokens = 0
+
+        cached_tokens = max(0, min(int(cached_tokens or 0), int(input_tokens or 0)))
+        return {
+            "inputTokens": int(input_tokens or 0),
+            "outputTokens": int(output_tokens or 0),
+            "totalTokens": int(total_tokens or 0),
+            "cachedTokens": int(cached_tokens or 0),
+        }
+
+    model_used = str(getattr(resp_used, "model", "") or "").strip() or model
+    usage_dict = _extract_usage_dict(resp_used)
+
+    if trace_enabled:
+        trace_meta_path = _write_trace_json(
+            "edit_response_meta",
+            {
+                "traceId": trace_id,
+                "openaiRequestId": openai_request_id or "",
+                "modelRequested": model,
+                "modelUsed": model_used,
+                "usage": usage_dict,
+                "requestArtifact": trace_request_path,
+                "rawArtifact": trace_raw_path,
+                "parsedArtifact": trace_parsed_path,
+            },
+        )
+        _LOG.info(
+            "edit.propose.trace trace_id=%s req=%s raw=%s parsed=%s meta=%s",
+            trace_id or "-",
+            trace_request_path or "-",
+            trace_raw_path or "-",
+            trace_parsed_path or "-",
+            trace_meta_path or "-",
+        )
+        _auto_prune_traces()
+
+    def _with_meta(d: Dict[str, Any]) -> Dict[str, Any]:
+        out = dict(d)
+        out["modelUsed"] = model_used
+        out["usage"] = usage_dict
+        if trace_enabled:
+            out["openaiRequestId"] = openai_request_id or ""
+            out["traceArtifacts"] = {
+                "request": trace_request_path,
+                "raw": trace_raw_path,
+                "parsed": trace_parsed_path,
+                "meta": trace_meta_path,
+            }
+        return out
 
     # Normalize + apply guardrails; never return an applyable proposal that fails validation.
     obj.setdefault("warnings", [])
     if obj.get("targetKey") != target_key:
-        return {
-            "status": "refused",
-            "targetKey": target_key,
-            "updatedText": current_text,
-            "rationale": "Model proposed a different targetKey; refusing.",
-            "warnings": ["target_key_mismatch"],
-            "selfCheck": False,
-            "refusalReason": "targetKey mismatch",
-        }
+        return _with_meta(
+            {
+                "status": "refused",
+                "targetKey": target_key,
+                "updatedText": current_text,
+                "rationale": "Model proposed a different targetKey; refusing.",
+                "warnings": ["target_key_mismatch"],
+                "selfCheck": False,
+                "refusalReason": "targetKey mismatch",
+            }
+        )
 
     updated_text = obj.get("updatedText")
     if not isinstance(updated_text, str):
-        return {
-            "status": "error",
-            "targetKey": target_key,
-            "updatedText": current_text,
-            "rationale": "Model did not return updatedText as a string.",
-            "warnings": ["invalid_updated_text"],
-            "selfCheck": False,
-            "refusalReason": "",
-        }
+        return _with_meta(
+            {
+                "status": "error",
+                "targetKey": target_key,
+                "updatedText": current_text,
+                "rationale": "Model did not return updatedText as a string.",
+                "warnings": ["invalid_updated_text"],
+                "selfCheck": False,
+                "refusalReason": "",
+            }
+        )
 
     errors = validate_prompt_edit(
         target_key=target_key, current_text=current_text, updated_text=updated_text
@@ -698,23 +902,27 @@ def propose_prompt_edit(
             else ""
         )
         combined = "; ".join([x for x in [refusal] if x] + errors)
-        return {
-            "status": "refused",
-            "targetKey": target_key,
-            "updatedText": current_text,
-            "rationale": (
-                obj.get("rationale") if isinstance(obj.get("rationale"), str) else ""
-            ),
-            "warnings": (
-                (obj.get("warnings") or [])
-                if isinstance(obj.get("warnings"), list)
-                else []
-            ),
-            "selfCheck": False,
-            "refusalReason": combined or "Proposal failed validation.",
-        }
+        return _with_meta(
+            {
+                "status": "refused",
+                "targetKey": target_key,
+                "updatedText": current_text,
+                "rationale": (
+                    obj.get("rationale")
+                    if isinstance(obj.get("rationale"), str)
+                    else ""
+                ),
+                "warnings": (
+                    (obj.get("warnings") or [])
+                    if isinstance(obj.get("warnings"), list)
+                    else []
+                ),
+                "selfCheck": False,
+                "refusalReason": combined or "Proposal failed validation.",
+            }
+        )
 
-    return obj
+    return _with_meta(obj)
 
 
 def _collapse_blank_lines(s: str) -> str:

@@ -47,6 +47,9 @@ const HUE_STYLES = [
   { background: '#f0fdf4', color: '#166534', borderColor: '#bbf7d0' },  // 8 green (base)
 ];
 
+// AI editor uses a fixed high-quality model (independent of the dropdown).
+const AI_EDITOR_MODEL = 'gpt-5.2';
+
 // ── API helper ────────────────────────────────────────────────────────
 async function api(path, opts) {
   const res = await fetch(path, opts);
@@ -175,6 +178,63 @@ function setAiAppliedInfo(text) {
   if (el) el.textContent = text || '';
 }
 
+function setAiCallMeta(text) {
+  const el = document.getElementById('aiCallMeta');
+  if (el) el.textContent = text || '';
+}
+
+function formatUsdShort(val) {
+  const num = Number(val);
+  if (!Number.isFinite(num)) return '—';
+  if (num === 0) return '$0';
+  if (num < 0.01) return '$' + num.toFixed(4);
+  return '$' + num.toFixed(2);
+}
+
+function renderAiCallMeta(meta, { running = false } = {}) {
+  const modelSelected = document.getElementById('modelSelect')?.value || '';
+  if (!meta || typeof meta !== 'object') {
+    setAiCallMeta(modelSelected ? `Model: ${modelSelected}` : '');
+    return;
+  }
+
+  const modelRequested = (typeof meta.modelRequested === 'string' && meta.modelRequested.trim()) ? meta.modelRequested.trim() : (modelSelected || '');
+  const modelUsed = (typeof meta.modelUsed === 'string' && meta.modelUsed.trim()) ? meta.modelUsed.trim() : (modelRequested || modelSelected || '');
+  const dryRun = !!meta.dryRun;
+
+  const parts = [];
+  if (modelUsed) {
+    const suffix = (modelRequested && modelRequested !== modelUsed) ? ` (requested ${modelRequested})` : '';
+    parts.push(`Model: ${modelUsed}${suffix}`);
+  } else if (modelSelected) {
+    parts.push(`Model: ${modelSelected}`);
+  }
+
+  const usage = meta.usage;
+  if (usage && typeof usage === 'object') {
+    const inputTokens = Number(usage.inputTokens) || 0;
+    const outputTokens = Number(usage.outputTokens) || 0;
+    const cachedTokens = Number(usage.cachedTokens) || 0;
+    const cachedPart = cachedTokens > 0 ? ` (${cachedTokens} cached)` : '';
+    parts.push(`Tokens: ${inputTokens} in / ${outputTokens} out${cachedPart}`);
+  }
+
+  const totalUsd = meta.cost && typeof meta.cost === 'object' ? meta.cost.totalUsd : null;
+  const costPart = Number.isFinite(Number(totalUsd)) ? `Est cost: ${formatUsdShort(totalUsd)}` : 'Est cost: —';
+  parts.push(costPart);
+
+  const traceId = (typeof meta.traceId === 'string' && meta.traceId.trim()) ? meta.traceId.trim() : '';
+  if (traceId) parts.push(`Trace: ${traceId}`);
+
+  const openaiReqId = (typeof meta.openaiRequestId === 'string' && meta.openaiRequestId.trim()) ? meta.openaiRequestId.trim() : '';
+  if (openaiReqId) parts.push(`OpenAI req: ${openaiReqId}`);
+
+  if (dryRun) parts.push('Dry run');
+  if (running) parts.push('Running…');
+
+  setAiCallMeta(parts.filter(Boolean).join(' · '));
+}
+
 function setPromoteStatus(text) {
   if (!text) return;
   const el = document.getElementById('aiEditStatus');
@@ -194,7 +254,6 @@ function showSysDiffOverlay(rawDiff) {
     else if (line.startsWith('@@')) span.className = 'dl-hdr';
     else span.className = 'dl-ctx';
     overlay.appendChild(span);
-    overlay.appendChild(document.createTextNode('\n'));
   }
   overlay.classList.add('visible');
   syncSysOverlayTop();
@@ -235,6 +294,9 @@ function openAiModal() {
     proposeBtn.classList.remove('loading');
     proposeBtn.disabled = true;
   }
+
+  // Show the AI editor model even before the first run.
+  renderAiCallMeta({ modelRequested: AI_EDITOR_MODEL, modelUsed: AI_EDITOR_MODEL, usage: null, cost: null, dryRun: !!document.getElementById('dryRun')?.checked });
 
   const modal = document.getElementById('aiModal');
   if (!modal) return;
@@ -360,48 +422,138 @@ async function onPillClick(id, versionObj, versionNum) {
     )).json();
     const snapshotText = d.snapshotText || (versionObj && versionObj.updatedText) || '';
     const label = versionObj ? pillLabel(versionObj, versionNum) : id;
-    enterPreviewMode(id, label, snapshotText, versionNum !== null && versionNum !== undefined ? (versionNum - 1) % 8 : 0);
+    await enterPreviewMode(id, label, snapshotText, versionNum);
   } catch (e) {
     document.getElementById('aiError').textContent = e.message;
   }
 }
 
-function enterPreviewMode(id, label, text, hue) {
+function _normalizeNewlines(s) {
+  return String(s || '').replaceAll('\r\n', '\n').replaceAll('\r', '\n');
+}
+
+function _buildAddedCountsPerVersion(baseText, snapshots) {
+  const out = [];
+  let prevText = baseText;
+  for (let k = 0; k < snapshots.length; k++) {
+    const nextText = snapshots[k];
+    const ops = computeLineDiff(prevText, nextText);
+    const addCounts = new Map();
+    for (const op of ops) {
+      if (op.type === 'add') _incCount(addCounts, op.text);
+    }
+    out.push(addCounts);
+    prevText = nextText;
+  }
+  return out;
+}
+
+function _renderAttributedOverlayForText(overlay, baseText, text, addedCountsPerVersion) {
+  const baseRemaining = new Map();
+  for (const ln of baseText.split('\n')) _incCount(baseRemaining, ln);
+
+  const lines = text.split('\n');
+  overlay.innerHTML = '';
+  for (const ln of lines) {
+    const span = document.createElement('span');
+
+    const baseCount = baseRemaining.get(ln) || 0;
+    if (baseCount > 0) {
+      _decCount(baseRemaining, ln);
+      span.className = 'dl-ctx';
+    } else {
+      let assignedHue = null;
+      for (let k = 0; k < addedCountsPerVersion.length; k++) {
+        const c = addedCountsPerVersion[k].get(ln) || 0;
+        if (c > 0) {
+          assignedHue = k % 8;
+          _decCount(addedCountsPerVersion[k], ln);
+          break;
+        }
+      }
+      if (assignedHue === null) assignedHue = (addedCountsPerVersion.length ? (addedCountsPerVersion.length - 1) : 0) % 8;
+      span.className = `dl-add-hue-${assignedHue}`;
+    }
+
+    span.textContent = ln;
+    overlay.appendChild(span);
+  }
+
+  overlay.classList.add('visible');
+}
+
+async function enterPreviewMode(id, label, text, versionNum) {
   previewPillId = id;
   updateActivePill(id);
 
-  document.getElementById('systemPrompt').value = text;
+  const normText = _normalizeNewlines(text);
+  document.getElementById('systemPrompt').value = normText;
 
   // Show a colored diff in the overlay so highlights are visible on the main screen.
   // Skip for the base pill (no diff — it IS the base).
-  if (id !== '__base__') {
-    const ops = computeLineDiff(baseSystemText, text);
+  if (id === '__base__') {
+    hideSysDiffOverlay();
+  } else {
     const overlay = document.getElementById('sysPromptDiffOverlay');
     if (overlay) {
-      overlay.innerHTML = '';
-      for (const op of ops) {
-        // In preview-mode overlays, deletions don't exist in the snapshot text,
-        // so rendering them creates duplicate-looking/red lines and misaligns.
-        // Deletions remain visible in the compare modal.
-        if (op.type === 'del') continue;
-        const s = document.createElement('span');
-        if (op.type === 'add') s.className = hue !== undefined ? `dl-add-hue-${hue}` : 'dl-add';
-        else s.className = 'dl-ctx';
-        s.textContent = op.text;
-        overlay.appendChild(s);
-        overlay.appendChild(document.createTextNode('\n'));
+      // Prefer per-version attribution (v1/v2/v3 hues) so older pills keep older colors.
+      // Fallback: single-hue diff if we can't determine the version index.
+      try {
+        const appId = document.getElementById('appSelect').value;
+        const mode = document.getElementById('modeSelect').value;
+        const targetKey = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
+
+        const currentMode = document.getElementById('modeSelect').value;
+        const visibleDrafts = draftVersions.filter(v => { const vm = modeForVersion(v); return !vm || vm === currentMode; });
+
+        let idx = -1;
+        if (typeof versionNum === 'number' && Number.isFinite(versionNum) && versionNum > 0) {
+          idx = Math.min(visibleDrafts.length - 1, Math.max(0, versionNum - 1));
+        } else {
+          idx = visibleDrafts.findIndex(v => String(v.id || '') === String(id));
+        }
+
+        if (idx >= 0) {
+          const draftsUpTo = visibleDrafts.slice(0, idx + 1);
+          const snapshots = await Promise.all(
+            draftsUpTo.map(v => getDraftSnapshotText(appId, String(v.id || ''), targetKey))
+          );
+          const baseText = _normalizeNewlines(baseSystemText || '');
+          const snapshotsNorm = snapshots.map(s => _normalizeNewlines(s || ''));
+          const addedCountsPerVersion = _buildAddedCountsPerVersion(baseText, snapshotsNorm);
+          // Clone maps so we can decrement counts safely during render.
+          const maps = addedCountsPerVersion.map(m => new Map(m));
+          _renderAttributedOverlayForText(overlay, baseText, normText, maps);
+        } else {
+          // Fallback: single-hue adds.
+          const hue = (typeof versionNum === 'number' && versionNum > 0) ? ((versionNum - 1) % 8) : 0;
+          const ops = computeLineDiff(_normalizeNewlines(baseSystemText || ''), normText);
+          overlay.innerHTML = '';
+          for (const op of ops) {
+            if (op.type === 'del') continue;
+            const s = document.createElement('span');
+            if (op.type === 'add') s.className = `dl-add-hue-${hue}`;
+            else s.className = 'dl-ctx';
+            s.textContent = op.text;
+            overlay.appendChild(s);
+          }
+          overlay.classList.add('visible');
+        }
+      } catch (_) {
+        // If anything goes wrong, keep the UI usable (no overlay rather than broken overlay).
+        hideSysDiffOverlay();
       }
-      overlay.classList.add('visible');
     }
-  } else {
-    hideSysDiffOverlay();
   }
 
   const bar = document.getElementById('sysVersionBar');
   const lbl = document.getElementById('sysVersionBarLabel');
   if (bar && lbl) {
     lbl.textContent = 'Previewing: ' + label;
-    const s = HUE_STYLES[hue !== undefined && hue >= 0 && hue <= 8 ? hue : 8];
+    const hue = (typeof versionNum === 'number' && Number.isFinite(versionNum) && versionNum > 0)
+      ? ((versionNum - 1) % 8)
+      : 8;
+    const s = HUE_STYLES[hue >= 0 && hue <= 8 ? hue : 8];
     bar.style.background = s.background;
     bar.style.color = s.color;
     bar.style.borderColor = s.borderColor;
@@ -474,7 +626,6 @@ function applyLatestWipHighlight(visibleDrafts) {
     else s.className = 'dl-ctx';
     s.textContent = op.text;
     overlay.appendChild(s);
-    overlay.appendChild(document.createTextNode('\n'));
   }
   overlay.classList.add('visible');
   syncSysOverlayTop();
@@ -585,7 +736,6 @@ async function applyLatestWipHighlightAsync(visibleDrafts) {
 
     span.textContent = ln;
     overlay.appendChild(span);
-    overlay.appendChild(document.createTextNode('\n'));
   }
 
   overlay.classList.add('visible');
@@ -663,7 +813,6 @@ function renderDiffPane(el, ops, side, hue) {
     else s.className = 'dl-ctx';
     s.textContent = op.text;
     el.appendChild(s);
-    el.appendChild(document.createTextNode('\n'));
   }
 }
 
@@ -819,6 +968,14 @@ async function refreshDrafts() {
   const deleteBtn = document.getElementById('compareDeleteBtn');
   if (deleteBtn) deleteBtn.disabled = draftVersions.length === 0;
 
+  const mainPublishBtn = document.getElementById('mainPublishBtn');
+  if (mainPublishBtn) {
+    mainPublishBtn.disabled = !latestSuiteIsClean;
+    mainPublishBtn.title = latestSuiteIsClean
+      ? 'Publish candidate \u2192 canonical prompts file'
+      : 'Run the suite first (all fixtures must pass)';
+  }
+
   const currentMode = document.getElementById('modeSelect').value;
   const visibleDrafts = draftVersions.filter(v => { const vm = modeForVersion(v); return !vm || vm === currentMode; });
   rebuildPills(visibleDrafts);
@@ -860,7 +1017,7 @@ async function aiPropose() {
   const status = document.getElementById('aiEditStatus');
 
   const appId = document.getElementById('appSelect').value;
-  const model = document.getElementById('modelSelect').value;
+  const model = AI_EDITOR_MODEL;
   const dryRun = !!document.getElementById('dryRun').checked;
   const mode = document.getElementById('modeSelect').value;
   const targetKey = MODE_TO_PROMPT_KEY[mode] || 'openerSystem';
@@ -891,6 +1048,8 @@ async function aiPropose() {
   document.getElementById('aiApplyBtn').disabled = true;
   status.textContent = '';
 
+  renderAiCallMeta({ modelRequested: model, modelUsed: model, dryRun, usage: null, cost: null }, { running: true });
+
   try {
     document.getElementById('updatedAtInput').value = nowUtcIso();
     const candidateObj = syncJsonFromFields();
@@ -909,6 +1068,8 @@ async function aiPropose() {
 
     const proposal = res.proposal;
     aiLastProposal = proposal;
+
+    renderAiCallMeta(res.callMeta || { modelRequested: model, modelUsed: model, dryRun });
 
     renderColoredDiff(res.diff || '', diffEl);
     showSysDiffOverlay(res.diff || '');
@@ -951,7 +1112,7 @@ async function aiApply() {
 
   const appId = document.getElementById('appSelect').value;
   const mode = document.getElementById('modeSelect').value;
-  const model = document.getElementById('modelSelect').value;
+  const model = AI_EDITOR_MODEL;
   const payload = {
     appId, mode, model,
     changeRequest: (document.getElementById('aiChangeRequest').value || '').trim(),
@@ -1287,7 +1448,6 @@ function renderColoredDiff(rawText, targetEl) {
     else if (line.startsWith('@@')) span.className = 'dl-hdr';
     else span.className = 'dl-ctx';
     targetEl.appendChild(span);
-    targetEl.appendChild(document.createTextNode('\n'));
   }
 }
 
@@ -1405,6 +1565,12 @@ document.getElementById('compareResetBtn').addEventListener('click', () => {
 });
 document.getElementById('comparePublishBtn').addEventListener('click', () => {
   closeCompareModal();
+  promoteToCanonical().catch(e => { document.getElementById('aiEditStatus').textContent = e.message; });
+});
+document.getElementById('mainResetBtn').addEventListener('click', () => {
+  aiReset().catch(e => { document.getElementById('aiError').textContent = e.message; });
+});
+document.getElementById('mainPublishBtn').addEventListener('click', () => {
   promoteToCanonical().catch(e => { document.getElementById('aiEditStatus').textContent = e.message; });
 });
 

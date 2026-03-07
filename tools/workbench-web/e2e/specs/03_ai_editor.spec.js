@@ -45,6 +45,8 @@ test('dry-run AI editor propose/apply/undo works without API key @audit', async 
     await expect(page.locator('#aiModal')).toBeVisible();
     await expect(page.locator('#aiBarLabel')).toBeVisible();
     await expect(page.locator('#aiBarLabel')).toContainText('AI');
+    await expect(page.locator('#aiCallMeta')).toBeVisible();
+    await expect(page.locator('#aiCallMeta')).toContainText('Model:');
 
     await auditScreenshot(page, test.info(), 'ai_editor_ready');
 
@@ -55,6 +57,8 @@ test('dry-run AI editor propose/apply/undo works without API key @audit', async 
 
     await expect(page.locator('#aiDiff')).toContainText('DRY_RUN_EDIT');
     await expect(page.locator('#aiApplyBtn')).toBeEnabled();
+    await expect(page.locator('#aiCallMeta')).toContainText('Dry run');
+    await expect(page.locator('#aiCallMeta')).toContainText('$0');
 
     await auditScreenshot(page, test.info(), 'ai_editor_after_propose');
 

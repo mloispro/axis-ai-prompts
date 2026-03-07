@@ -94,8 +94,12 @@
       </div><!-- .editor-body -->
 
       <div class="editor-footer">
+        <button class="btn btn-warning btn-sm" id="mainResetBtn" type="button"
+          title="Reset candidate to base and discard all draft versions">Reset to Base</button>
         <div class="flex-1"></div>
         <span id="aiEditStatus" class="muted footer-status" role="status" aria-live="polite"></span>
+        <button class="btn btn-sm btn-apply" id="mainPublishBtn" type="button"
+          title="Run the suite first (all fixtures must pass)">Publish</button>
       </div>
     </div><!-- .editor-panel -->
 
@@ -190,6 +194,7 @@
               placeholder="Describe the change… (Enter to run)" />
             <button class="ai-run-btn" id="aiProposeBtn" type="button" title="Propose improvement">&#9654;</button>
           </div>
+          <div class="ai-call-meta" id="aiCallMeta" aria-live="polite"></div>
           <div id="aiDiffWrap">
             <div class="diff-area" id="aiDiff"></div>
             <div class="ai-action-row">

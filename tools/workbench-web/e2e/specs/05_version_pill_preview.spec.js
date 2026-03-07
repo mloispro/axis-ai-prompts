@@ -105,6 +105,22 @@ test('version pill preview shows version bar and can be dismissed @audit', async
 
     await auditScreenshot(page, test.info(), 'before_preview_click');
 
+    // Regression: previewing the latest pill should show multiple hues
+    // (older changes keep their original version colors).
+    await nonBasePills.first().click();
+    await expect(versionBar).toBeVisible();
+    await expect(page.locator('#sysPromptDiffOverlay .dl-del')).toHaveCount(0);
+    await expect
+        .poll(async () => await page.locator('#sysPromptDiffOverlay .dl-add-hue-0').count())
+        .toBeGreaterThan(0);
+    await expect
+        .poll(async () => await page.locator('#sysPromptDiffOverlay .dl-add-hue-1').count())
+        .toBeGreaterThan(0);
+
+    // Exit preview mode so the rest of the test can exercise older-pill preview.
+    await page.locator('#versionPills .version-pill.active').click();
+    await expect(versionBar).not.toBeVisible();
+
     // Click the LAST (oldest) non-base pill to enter preview mode.
     await nonBasePills.last().click();
     await expect(versionBar).toBeVisible();

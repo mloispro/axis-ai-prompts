@@ -10,6 +10,7 @@ out/
 
 # Workbench local draft state (never commit)
 tools/workbench-web/state/
+tools/workbench-web/state-e2e/
 
 # Python caches
 **/__pycache__/

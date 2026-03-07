@@ -81,7 +81,13 @@ def _try_git_head_sha(cwd: Path) -> str:
 
 
 # Candidate + optional local baseline live under tools/workbench-web/state/ for local iteration (gitignored).
-STATE_DIR = WEB_ROOT / "state"
+# Tests/e2e should run against an isolated state dir to avoid wiping local WIP drafts.
+_STATE_DIR_OVERRIDE = (os.environ.get("WORKBENCH_STATE_DIR") or "").strip()
+if _STATE_DIR_OVERRIDE:
+    _p = Path(_STATE_DIR_OVERRIDE)
+    STATE_DIR = (_p if _p.is_absolute() else (WEB_ROOT / _p)).resolve()
+else:
+    STATE_DIR = WEB_ROOT / "state"
 CANDIDATES_DIR = STATE_DIR / "candidates"
 BASELINES_DIR = STATE_DIR / "baselines"
 HISTORY_DIR = STATE_DIR / "history"
@@ -1018,7 +1024,9 @@ def api_edit_propose(payload: Dict[str, Any], request: Request) -> JSONResponse:
     _ensure_state_dirs()
 
     app_id = (payload.get("appId") or "").strip() or _default_app_id()
-    model = (payload.get("model") or "").strip() or "gpt-5-mini"
+    # AI editor uses a fixed high-quality model. The UI dropdown is not authoritative.
+    model_requested = (payload.get("model") or "").strip() or ""
+    model = "gpt-5.2"
     target_key = (payload.get("targetKey") or "").strip()
     change_request = (payload.get("changeRequest") or "").strip()
     dry_run = bool(payload.get("dryRun") or False)
@@ -1089,7 +1097,61 @@ def api_edit_propose(payload: Dict[str, Any], request: Request) -> JSONResponse:
         b_label=f"proposed:{target_key}",
     )
 
-    return JSONResponse({"proposal": resp, "diff": diff, "currentText": current_text})
+    # Surface call transparency for reassurance: model actually used + usage + estimated cost.
+    model_used = model
+    usage_norm: Optional[Dict[str, Any]] = None
+    if isinstance(resp, dict):
+        mu = resp.get("modelUsed")
+        if isinstance(mu, str) and mu.strip():
+            model_used = mu.strip()
+        usage = resp.get("usage")
+        if isinstance(usage, dict):
+            usage_norm = {
+                "inputTokens": int(usage.get("inputTokens") or 0),
+                "outputTokens": int(usage.get("outputTokens") or 0),
+                "totalTokens": int(usage.get("totalTokens") or 0),
+                "cachedTokens": int(usage.get("cachedTokens") or 0),
+            }
+
+    pricing = _pricing_by_model(model_used)
+    cost: Optional[Dict[str, Any]] = None
+    pricing_out: Optional[Dict[str, Any]] = None
+    if pricing is not None:
+        pricing_out = {
+            "inputPer1M": pricing.input_per_1m,
+            "cachedInputPer1M": pricing.cached_input_per_1m,
+            "outputPer1M": pricing.output_per_1m,
+        }
+        if usage_norm is not None:
+            cost = _compute_cost_usd(usage_norm, pricing)
+
+    call_meta: Dict[str, Any] = {
+        "traceId": trace_id,
+        "dryRun": bool(dry_run),
+        "modelRequested": model_requested or model,
+        "modelUsed": model_used,
+        "usage": usage_norm,
+        "pricing": pricing_out,
+        "cost": cost,
+    }
+
+    # Optional debugging aids (enabled via WORKBENCH_TRACE_AI=1).
+    if isinstance(resp, dict):
+        req_id = resp.get("openaiRequestId")
+        if isinstance(req_id, str) and req_id.strip():
+            call_meta["openaiRequestId"] = req_id.strip()
+        artifacts = resp.get("traceArtifacts")
+        if isinstance(artifacts, dict) and artifacts:
+            call_meta["traceArtifacts"] = artifacts
+
+    return JSONResponse(
+        {
+            "proposal": resp,
+            "diff": diff,
+            "currentText": current_text,
+            "callMeta": call_meta,
+        }
+    )
 
 
 @app.post("/api/edit/apply")

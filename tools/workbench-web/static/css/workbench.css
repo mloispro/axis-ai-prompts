@@ -752,6 +752,15 @@ textarea[readonly] {
   align-items: center;
 }
 
+.ai-call-meta {
+  padding: 2px 12px 6px;
+  font-size: 12px;
+  color: #777;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  min-height: 18px;
+}
+
 .ai-bar-input {
   flex: 1;
   border: none;
@@ -831,6 +840,10 @@ textarea[readonly] {
 }
 
 .ai-bar.loading .ai-bar-input {
+  color: #aaa;
+}
+
+.ai-bar.loading .ai-call-meta {
   color: #aaa;
 }
 

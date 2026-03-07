@@ -1535,6 +1535,17 @@ def _try_open_path(path: Path) -> None:
 
 
 def main_argv(argv: Sequence[str]) -> int:
+    # On Windows, stdout/stderr may use a legacy code page (e.g., cp1252).
+    # If any printed text includes characters outside that encoding (like emoji),
+    # Python can raise UnicodeEncodeError ('charmap' codec can't encode...).
+    # We never want a run to fail because of console encoding.
+    for _stream in (getattr(sys, "stdout", None), getattr(sys, "stderr", None)):
+        try:
+            if _stream and hasattr(_stream, "reconfigure"):
+                _stream.reconfigure(errors="backslashreplace")
+        except Exception:
+            pass
+
     parser = argparse.ArgumentParser(description="Prompt Workbench")
     parser.add_argument(
         "--app-id",

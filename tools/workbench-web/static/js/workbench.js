@@ -344,6 +344,15 @@ function inferModeFromTargetKey(tk) {
   return '';
 }
 
+function updateModeWipIndicators() {
+  const modeSelect = document.getElementById('modeSelect');
+  if (!modeSelect) return;
+  const wipModes = new Set(draftVersions.map(v => modeForVersion(v)).filter(Boolean));
+  for (const opt of modeSelect.options) {
+    opt.textContent = opt.value + (wipModes.has(opt.value) ? '  ●' : '');
+  }
+}
+
 function modeForVersion(v) {
   if (!v) return '';
   const m = String(v.mode || '').trim();
@@ -961,6 +970,7 @@ async function refreshDrafts() {
 
   const res = await (await api('/api/drafts?appId=' + encodeURIComponent(appId))).json();
   draftVersions = res.versions || [];
+  updateModeWipIndicators();
   latestSuite = res.latestSuite || null;
   latestSuiteIsClean = res.latestSuiteIsClean === true;
 
@@ -1257,7 +1267,14 @@ async function onAppChanged() {
     modeSelect.appendChild(opt);
   }
 
+  // Restore last-used mode for this app
+  const lastMode = localStorage.getItem('wb:lastMode:' + appId);
+  if (lastMode && [...modeSelect.options].some(o => o.value === lastMode)) {
+    modeSelect.value = lastMode;
+  }
+
   modeSelect.addEventListener('change', () => {
+    localStorage.setItem('wb:lastMode:' + appId, modeSelect.value);
     if (currentCandidate) syncFieldsFromCandidate(currentCandidate);
     refreshBaseSystemText();
     loadFixtures().catch(() => { });
@@ -1265,7 +1282,7 @@ async function onAppChanged() {
   });
 
   const modelSelect = document.getElementById('modelSelect');
-  const desired = (cfg.defaultModel || 'gpt-5-mini').trim();
+  const desired = (cfg.defaultModel || 'gpt-5.2').trim();
   const has = [...modelSelect.options].some(o => o.value === desired);
   modelSelect.value = has ? desired : (modelSelect.options[0]?.value || desired);
 

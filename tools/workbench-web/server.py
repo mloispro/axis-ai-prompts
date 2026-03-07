@@ -396,7 +396,7 @@ def _try_get_app_local_index(app_id: str) -> Optional[Dict[str, Any]]:
                 "defaultPromptsPath": str(prompts_file),
                 "promptsPath": prompts_path,
                 "modes": modes,
-                "defaultModel": (a.get("defaultModel") or "gpt-5-mini").strip(),
+                "defaultModel": (a.get("defaultModel") or "gpt-5.2").strip(),
             }
 
         return None
@@ -462,7 +462,7 @@ def _try_get_app_remote(app_id: str) -> Optional[Dict[str, Any]]:
                 "defaultPromptsPath": str(prompts_file),
                 "promptsPath": prompts_path,
                 "modes": modes,
-                "defaultModel": (a.get("defaultModel") or "gpt-5-mini").strip(),
+                "defaultModel": (a.get("defaultModel") or "gpt-5.2").strip(),
             }
 
         return None
@@ -505,7 +505,7 @@ def _get_app(app_id: str) -> Dict[str, Any]:
             "defaultPromptsPath": str(p),
             "promptsPath": f"prompts/{app_id}.json",
             "modes": ["opener", "app_chat", "reg_chat"],
-            "defaultModel": "gpt-5-mini",
+            "defaultModel": "gpt-5.2",
         }
 
     raise HTTPException(status_code=404, detail="Unknown appId")
@@ -665,11 +665,11 @@ _MODEL_CATALOG: List[ModelPricing] = [
 def _pick_models_for_dropdown() -> List[ModelPricing]:
     # Keep the dropdown intentionally small (4 options) and aligned to the
     # recommended workflow:
-    # - default: gpt-5-mini
+    # - default: gpt-5.2
+    # - cheapest/bulk: gpt-5-mini
     # - cheapest/bulk: gpt-5-nano
-    # - quality fallback: gpt-5.2
-    # - additional latest option: gpt-5.1
-    preferred = ["gpt-5-mini", "gpt-5-nano", "gpt-5.2", "gpt-5.1"]
+    # - additional option: gpt-5.1
+    preferred = ["gpt-5.2", "gpt-5-mini", "gpt-5-nano", "gpt-5.1"]
     by_name = {m.model: m for m in _MODEL_CATALOG}
     out: List[ModelPricing] = []
     for name in preferred:

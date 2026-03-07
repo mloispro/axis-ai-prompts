@@ -233,7 +233,9 @@ textarea[readonly] {
   background: var(--surface);
   display: flex;
   flex-direction: column;
-  min-height: calc(100vh - 54px);
+  height: calc(100vh - 54px);
+  position: sticky;
+  top: 54px;
 }
 
 .editor-body {
@@ -243,6 +245,7 @@ textarea[readonly] {
   flex-direction: column;
   gap: 14px;
   min-height: 0;
+  overflow-y: auto;
 }
 
 .section-label {
